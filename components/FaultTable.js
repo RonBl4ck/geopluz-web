@@ -30,7 +30,7 @@ export default function FaultTable({
         </thead>
         <tbody>
           <tr>
-            <td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
+            <td colSpan={10} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
               No hay registros marcados.
             </td>
           </tr>
@@ -49,6 +49,8 @@ export default function FaultTable({
             <th>SED-LLAVE</th>
             <th>FALLA REAL</th>
             <th>CAUSA</th>
+            <th>NOTA ESPECÍFICA</th>
+            <th>CROQUIS</th>
             <th>SUMINISTRO</th>
             <th>EVIDENCIA</th>
             <th>ACCIÓN</th>
@@ -57,7 +59,8 @@ export default function FaultTable({
         <tbody>
           {points.map((pt, idx) => {
             const displayNum = pt.localNumber || pt.number;
-            const hasCoords = pt.coords && !isNaN(pt.coords[0]) && !isNaN(pt.coords[1]);
+            const isMulti = pt.coords && Array.isArray(pt.coords[0]);
+            const hasCoords = pt.coords && (isMulti ? pt.coords.length > 0 : (!isNaN(pt.coords[0]) && !isNaN(pt.coords[1])));
             const fotosCount = pt.fotos ? pt.fotos.length : 0;
 
             return (
@@ -70,11 +73,27 @@ export default function FaultTable({
                   <b style={{ color: 'var(--accent-danger)' }}>({displayNum})</b>
                 </td>
                 <td>
-                  {pt.ticket} {!hasCoords && <span style={{ color: 'red', fontSize: '9px' }}>[Sin GPS]</span>}
+                  {pt.ticket} {isMulti && <span style={{ color: '#ed6c02', fontSize: '9.5px', fontWeight: 'bold' }}>[📍 2 Puntos]</span>} {!hasCoords && <span style={{ color: 'red', fontSize: '9px' }}>[Sin GPS]</span>}
                 </td>
                 <td>{pt.sedLlave}</td>
                 <td>{pt.falla || pt.fallaReal}</td>
                 <td>{pt.causa}</td>
+                <td style={{ fontSize: '10.5px', color: 'var(--text-muted)' }}>{pt.nota || '-'}</td>
+                <td>
+                  {(pt.linkCroquis || pt.link_croquis || pt.croquis) ? (
+                    <a
+                      href={pt.linkCroquis || pt.link_croquis || pt.croquis}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      style={{ color: 'var(--accent-cyan)', fontWeight: 'bold', textDecoration: 'underline', fontSize: '11px' }}
+                    >
+                      🗺️ Ver Croquis ↗
+                    </a>
+                  ) : (
+                    <span style={{ color: 'var(--text-muted)', fontSize: '10px' }}>-</span>
+                  )}
+                </td>
                 <td>{pt.suministro}</td>
                 <td>
                   {fotosCount > 0 ? (
@@ -93,21 +112,21 @@ export default function FaultTable({
                   {showActions ? (
                     <>
                       <button 
-                        onClick={(e) => { e.stopPropagation(); onRelocate && onRelocate(idx); }} 
+                        onClick={(e) => { e.stopPropagation(); onRelocate && onRelocate(pt.originalIndex !== undefined ? pt.originalIndex : idx); }} 
                         title={hasCoords ? 'Reubicar en Mapa' : 'Ubicar en Mapa'} 
                         style={{ background: 'none', border: 'none', color: 'var(--accent-warning)', cursor: 'pointer', marginRight: '6px' }}
                       >
                         <i className="fa-solid fa-crosshairs"></i> {hasCoords ? 'Reubicar' : '📍 Ubicar'}
                       </button>
                       <button 
-                        onClick={(e) => { e.stopPropagation(); onEdit && onEdit(idx); }} 
+                        onClick={(e) => { e.stopPropagation(); onEdit && onEdit(pt.originalIndex !== undefined ? pt.originalIndex : idx); }} 
                         title="Editar Datos" 
                         style={{ background: 'none', border: 'none', color: 'var(--accent-cyan)', cursor: 'pointer', marginRight: '6px' }}
                       >
                         <i className="fa-solid fa-pen-to-square"></i>
                       </button>
                       <button 
-                        onClick={(e) => { e.stopPropagation(); onDelete && onDelete(idx); }} 
+                        onClick={(e) => { e.stopPropagation(); onDelete && onDelete(pt.originalIndex !== undefined ? pt.originalIndex : idx); }} 
                         title="Eliminar Registro" 
                         style={{ background: 'none', border: 'none', color: 'red', cursor: 'pointer' }}
                       >

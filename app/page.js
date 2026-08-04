@@ -90,6 +90,7 @@ export default function Page() {
             llaveCampo: `${f.llave_code || ''} (Campo)`,
             falla: f.falla_real || '',
             causa: f.causa || '',
+            linkCroquis: f.link_croquis || '',
             fotos: f.fotos || []
           }));
           setNumberedPointsList(points);
@@ -102,14 +103,14 @@ export default function Page() {
 
   // Filtrado de Puntos
   const getFilteredPoints = useCallback(() => {
-    let list = numberedPointsList;
-    if (currentSedId) {
-      list = list.filter(pt => {
+    return numberedPointsList
+      .map((pt, i) => ({ ...pt, originalIndex: i }))
+      .filter(pt => {
+        if (!currentSedId) return true;
         const ptSed = pt.sed || (pt.sedLlave ? pt.sedLlave.split('-')[0] : '');
         return ptSed === currentSedId || (pt.sedLlave && pt.sedLlave.includes(currentSedId));
-      });
-    }
-    return list.map((pt, i) => ({ ...pt, localNumber: i + 1 }));
+      })
+      .map((pt, i) => ({ ...pt, localNumber: i + 1 }));
   }, [numberedPointsList, currentSedId]);
 
   const filteredPoints = getFilteredPoints();
@@ -157,57 +158,129 @@ export default function Page() {
   }
 
   function mergeJsonData(rawData) {
+    // 1. Si contiene lista de fallas (o es un arreglo de registros de falla)
+    let incomingFallas = [];
+    if (Array.isArray(rawData) && rawData.length > 0 && (rawData[0].ticket || rawData[0].sedLlave || rawData[0].falla)) {
+      incomingFallas = rawData;
+    } else if (rawData.fallas && Array.isArray(rawData.fallas)) {
+      incomingFallas = rawData.fallas;
+    } else if (rawData.points && Array.isArray(rawData.points)) {
+      incomingFallas = rawData.points;
+    }
+
+    if (incomingFallas.length > 0) {
+      let addedCount = 0;
+      let skippedCount = 0;
+
+      setNumberedPointsList(prev => {
+        const existing = [...prev];
+        const existingTickets = new Set(existing.map(p => String(p.ticket).trim().toLowerCase()).filter(Boolean));
+
+        incomingFallas.forEach(pt => {
+          const rawTicket = String(pt.ticket || '').trim();
+          const ticketKey = rawTicket.toLowerCase();
+
+          if (ticketKey && existingTickets.has(ticketKey)) {
+            skippedCount++;
+            return;
+          }
+
+          if (ticketKey) existingTickets.add(ticketKey);
+
+          const pointNum = existing.length + 1;
+          existing.push({
+            number: pointNum,
+            coords: pt.coords || null,
+            ticket: pt.ticket || `TK-${pointNum}`,
+            horaInicio: pt.horaInicio || new Date().toLocaleString(),
+            zona: pt.zona || 'Zona Norte',
+            set: pt.set || 'SET',
+            alimentador: pt.alimentador || 'Alim',
+            nota: pt.nota || 'Falla atendida',
+            odm: pt.odm || 'ODM-000',
+            suministro: pt.suministro || 'N/A',
+            sedLlave: pt.sedLlave || '00007S-3SP',
+            sed: pt.sed || (pt.sedLlave ? pt.sedLlave.split('-')[0] : 'SED'),
+            llaveSistema: pt.llaveSistema || (pt.sedLlave ? pt.sedLlave.split('-')[1] : 'LLAVE'),
+            llaveCampo: pt.llaveCampo || `${pt.llaveSistema || 'LLAVE'} (Campo)`,
+            falla: pt.falla || pt.fallaReal || 'Avería reparada',
+            causa: pt.causa || 'Deterioro',
+            linkCroquis: pt.linkCroquis || pt.link_croquis || pt.croquis || '',
+            fotos: pt.fotos || []
+          });
+          addedCount++;
+        });
+
+        if (existing.length > 0 && incomingFallas[0]) {
+          const ptSed = incomingFallas[0].sed || (incomingFallas[0].sedLlave ? incomingFallas[0].sedLlave.split('-')[0] : null);
+          if (ptSed) setCurrentSedId(ptSed);
+        }
+
+        return existing;
+      });
+
+      setTimeout(() => {
+        let msg = `✅ ¡FALLAS CARGADAS!\n\n• Agregados: ${addedCount} registro(s).`;
+        if (skippedCount > 0) {
+          msg += `\n• Omitidos por Ticket duplicado: ${skippedCount} registro(s).`;
+        }
+        alert(msg);
+      }, 100);
+    }
+
+    // 2. Si contiene estructura de red (SEDs y Llaves)
     let incoming = {};
     if (rawData.seds && typeof rawData.seds === 'object') {
       incoming = rawData.seds;
-    } else if (Array.isArray(rawData)) {
+    } else if (Array.isArray(rawData) && rawData.length > 0 && rawData[0].llaves) {
       rawData.forEach(item => { if (item.id) incoming[item.id] = item; });
-    } else if (rawData.id) {
+    } else if (rawData.id && rawData.llaves) {
       incoming[rawData.id] = rawData;
-    } else {
+    } else if (!Array.isArray(rawData)) {
       for (const k in rawData) {
         if (typeof rawData[k] === 'object' && rawData[k].llaves) {
           incoming[k] = rawData[k];
         }
       }
     }
-    
-    setLocalDatabase(prev => {
-      const updated = { ...prev };
-      for (const sedId in incoming) {
-        if (!updated[sedId]) {
-          updated[sedId] = incoming[sedId];
-        } else {
-          const existingLlaves = { ...(updated[sedId].llaves || {}) };
-          const newLlaves = incoming[sedId].llaves || {};
-          for (const llaveId in newLlaves) {
-            existingLlaves[llaveId] = newLlaves[llaveId];
+
+    if (Object.keys(incoming).length > 0) {
+      setLocalDatabase(prev => {
+        const updated = { ...prev };
+        for (const sedId in incoming) {
+          if (!updated[sedId]) {
+            updated[sedId] = incoming[sedId];
+          } else {
+            const existingLlaves = { ...(updated[sedId].llaves || {}) };
+            const newLlaves = incoming[sedId].llaves || {};
+            for (const llaveId in newLlaves) {
+              existingLlaves[llaveId] = newLlaves[llaveId];
+            }
+            updated[sedId] = { ...updated[sedId], llaves: existingLlaves };
           }
-          updated[sedId] = { ...updated[sedId], llaves: existingLlaves };
         }
-      }
 
-      // Buscar SED real prioritaria (ignorando plantilla SED_ACTIVA si existen SEDs reales con llaves)
-      const sedKeys = Object.keys(updated);
-      const realSedKey = sedKeys.find(k => k !== 'SED_ACTIVA' && Object.keys(updated[k]?.llaves || {}).length > 0) || sedKeys[0];
+        const sedKeys = Object.keys(updated);
+        const realSedKey = sedKeys.find(k => k !== 'SED_ACTIVA' && Object.keys(updated[k]?.llaves || {}).length > 0) || sedKeys[0];
 
-      if (realSedKey) {
-        setCurrentSedId(realSedKey);
-        const llaveKeys = Object.keys(updated[realSedKey]?.llaves || {});
-        const realLlaveKey = llaveKeys.find(k => k !== 'CIRCUITO_ACTIVO') || llaveKeys[0];
-        if (realLlaveKey) {
-          setCurrentLlaveId(realLlaveKey);
+        if (realSedKey) {
+          setCurrentSedId(realSedKey);
+          const llaveKeys = Object.keys(updated[realSedKey]?.llaves || {});
+          const realLlaveKey = llaveKeys.find(k => k !== 'CIRCUITO_ACTIVO') || llaveKeys[0];
+          if (realLlaveKey) {
+            setCurrentLlaveId(realLlaveKey);
+          }
         }
-      }
 
-      const realCount = sedKeys.filter(k => k !== 'SED_ACTIVA').length || sedKeys.length;
+        const realCount = sedKeys.filter(k => k !== 'SED_ACTIVA').length || sedKeys.length;
 
-      setTimeout(() => {
-        alert(`✅ ¡DATOS CARGADOS! Se detectaron ${realCount} Subestaciones de Distribución (SEDs) con sus llaves de circuito.`);
-      }, 100);
+        setTimeout(() => {
+          alert(`✅ ¡RED ELÉCTRICA CARGADA! Se detectaron ${realCount} Subestación(es) (SEDs) con sus llaves.`);
+        }, 100);
 
-      return updated;
-    });
+        return updated;
+      });
+    }
   }
 
   // Guardar en la Base Principal (Supabase) solicitando contraseña
@@ -258,8 +331,9 @@ export default function Page() {
   }
 
   // Importación Excel
-  function handleImportExcel(file) {
-    if (!checkEditPermission()) return;
+  async function handleImportExcel(file) {
+    const allowed = await checkEditPermission();
+    if (!allowed) return;
     const reader = new FileReader();
     reader.onload = (evt) => {
       try {
@@ -267,7 +341,9 @@ export default function Page() {
         const data = new Uint8Array(evt.target.result);
         const workbook = XLSX.read(data, { type: 'array' });
         let importedPoints = 0;
+        let skippedPoints = 0;
         const newPoints = [...numberedPointsList];
+        const existingTickets = new Set(newPoints.map(p => String(p.ticket).trim().toLowerCase()).filter(Boolean));
         
         workbook.SheetNames.forEach(sheetName => {
           const worksheet = workbook.Sheets[sheetName];
@@ -279,6 +355,16 @@ export default function Page() {
             const lng = parseFloat(row['Longitud'] || row['LONGITUD'] || row['Lng'] || row['lng']);
             
             if (ticket || (!isNaN(lat) && !isNaN(lng))) {
+              const rawTicket = String(ticket || '').trim();
+              const ticketKey = rawTicket.toLowerCase();
+
+              if (ticketKey && existingTickets.has(ticketKey)) {
+                skippedPoints++;
+                return;
+              }
+
+              if (ticketKey) existingTickets.add(ticketKey);
+
               const sedLlaveVal = row['Sed-Llave'] || row['SED-LLAVE'] || sheetName || '00007S-5SP';
               const partes = sedLlaveVal.split('-');
               
@@ -299,7 +385,8 @@ export default function Page() {
                 llaveSistema: partes[1] || '5SP',
                 llaveCampo: `${partes[1] || '5SP'} (Campo)`,
                 falla: String(row['Falla Real'] || row['FALLA REAL'] || 'Avería reparada'),
-                causa: String(row['Causa'] || row['CAUSA'] || 'Deterioro')
+                causa: String(row['Causa'] || row['CAUSA'] || 'Deterioro'),
+                linkCroquis: String(row['Link del Croquis'] || row['LINK DEL CROQUIS'] || row['Croquis'] || row['CROQUIS'] || row['Link'] || row['LINK'] || '')
               };
               newPoints.push(pointData);
               importedPoints++;
@@ -309,7 +396,11 @@ export default function Page() {
         });
         
         setNumberedPointsList(newPoints);
-        alert(`✅ EXCEL IMPORTADO: ${importedPoints} registros cargados.`);
+        let msg = `✅ EXCEL IMPORTADO:\n\n• Agregados: ${importedPoints} registros.`;
+        if (skippedPoints > 0) {
+          msg += `\n• Omitidos por Ticket duplicado: ${skippedPoints} registros.`;
+        }
+        alert(msg);
       } catch(err) {
         alert('Error al procesar Excel: ' + err.message);
       }
@@ -372,21 +463,29 @@ export default function Page() {
   }
 
   // Acciones en el mapa
-  async function handleMapClick(latlng) {
+  // Usando useCallback para que la referencia se actualice cuando cambie relocatingPointIndex,
+  // lo que permite que la ref en MapViewer siempre tenga el callback más reciente.
+  const handleMapClick = useCallback(async (latlng) => {
     if (relocatingPointIndex !== null) {
       const allowed = await checkEditPermission();
       if (!allowed) {
         setRelocatingPointIndex(null);
         return;
       }
-      const updated = [...numberedPointsList];
-      updated[relocatingPointIndex] = {
-        ...updated[relocatingPointIndex],
-        coords: [latlng.lat, latlng.lng]
-      };
-      setNumberedPointsList(updated);
+      setNumberedPointsList(prev => {
+        const updated = [...prev];
+        const targetPoint = updated[relocatingPointIndex];
+        if (targetPoint) {
+          updated[relocatingPointIndex] = {
+            ...targetPoint,
+            coords: [latlng.lat, latlng.lng]
+          };
+          saveFallaToSupabase(updated[relocatingPointIndex]);
+          alert(`✅ Punto de Falla #${targetPoint.localNumber || targetPoint.number || ''} reubicado con éxito en: ${latlng.lat.toFixed(6)}, ${latlng.lng.toFixed(6)}`);
+        }
+        return updated;
+      });
       setRelocatingPointIndex(null);
-      saveFallaToSupabase(updated[relocatingPointIndex]);
       return;
     }
     
@@ -418,7 +517,8 @@ export default function Page() {
     setNumberedPointsList(updated);
     setEditingPointIndex(updated.length - 1);
     setIsFormOpen(true);
-  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [relocatingPointIndex, isAddPointMode, isPresentationMode, numberedPointsList, currentSedId, currentLlaveId]);
 
   // Guardado de Falla
   function handleSavePoint(pointData) {
@@ -454,6 +554,7 @@ export default function Page() {
         hora_inicio: point.horaInicio,
         latitud: point.coords ? point.coords[0] : null,
         longitud: point.coords ? point.coords[1] : null,
+        link_croquis: point.linkCroquis || null,
         fotos: point.fotos || []
       };
       
@@ -472,8 +573,9 @@ export default function Page() {
   }
 
   // Eliminar Falla
-  function handleDeletePoint(index) {
-    if (!checkEditPermission()) return;
+  async function handleDeletePoint(index) {
+    const allowed = await checkEditPermission();
+    if (!allowed) return;
     if (confirm('¿Estás seguro de que deseas eliminar esta falla?')) {
       const point = numberedPointsList[index];
       const updated = numberedPointsList.filter((_, i) => i !== index);
@@ -485,8 +587,9 @@ export default function Page() {
   }
 
   // Eliminar SED y Llave
-  function handleDeleteSed(sedId) {
-    if (!checkEditPermission()) return;
+  async function handleDeleteSed(sedId) {
+    const allowed = await checkEditPermission();
+    if (!allowed) return;
     if (confirm(`¿Eliminar la SED ${sedId} por completo?`)) {
       const updated = { ...localDatabase };
       delete updated[sedId];
@@ -499,8 +602,9 @@ export default function Page() {
     }
   }
 
-  function handleDeleteLlave(sedId, llaveId) {
-    if (!checkEditPermission()) return;
+  async function handleDeleteLlave(sedId, llaveId) {
+    const allowed = await checkEditPermission();
+    if (!allowed) return;
     if (confirm(`¿Eliminar la llave ${llaveId} de la SED ${sedId}?`)) {
       const updated = { ...localDatabase };
       if (updated[sedId] && updated[sedId].llaves) {
@@ -515,8 +619,9 @@ export default function Page() {
   }
 
   // Reubicación
-  function handleRelocatePoint(index) {
-    if (!checkEditPermission()) return;
+  async function handleRelocatePoint(index) {
+    const allowed = await checkEditPermission();
+    if (!allowed) return;
     setRelocatingPointIndex(index);
     alert('Haz clic en el mapa en la nueva ubicación.');
   }
@@ -624,6 +729,7 @@ export default function Page() {
           sedCoord={currentSedCoord}
           faultPoints={filteredPoints}
           isAddPointMode={isAddPointMode}
+          isRelocating={relocatingPointIndex !== null}
           isPresentationMode={isPresentationMode}
           onMapClick={handleMapClick}
           onSedDragEnd={handleSedDragEnd}
@@ -634,8 +740,11 @@ export default function Page() {
       {isPresentationMode && (
         <>
           <PresentationHUD
+            sedId={currentSedId}
             sedName={localDatabase[currentSedId]?.name || currentSedId || 'Sin SED'}
             llaveName={currentLlaveId || 'Sin Llave'}
+            sedsList={sedsList}
+            onSelectSed={handleSedSelect}
             currentMapStyle={currentMapStyle}
             onPrevSed={() => navigateSed(-1)}
             onNextSed={() => navigateSed(1)}

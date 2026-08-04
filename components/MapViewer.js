@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useImperativeHandle, forwardRef } from 'react';
+import { useEffect, useRef, useImperativeHandle, forwardRef, useCallback } from 'react';
 import { fixCoord, getWeightForZoom } from '@/lib/coordUtils';
 import { TILE_LAYERS, MAP_DEFAULT_CENTER, MAP_DEFAULT_ZOOM, MAP_MAX_ZOOM } from '@/lib/constants';
 
@@ -12,6 +12,7 @@ const MapViewer = forwardRef(({
   sedCoord,
   faultPoints,
   isAddPointMode,
+  isRelocating,
   isPresentationMode,
   onMapClick,
   onSedDragEnd,
@@ -25,6 +26,13 @@ const MapViewer = forwardRef(({
   const networkLayerGroupRef = useRef(null);
   const pointsLayerGroupRef = useRef(null);
   const sedMarkerRef = useRef(null);
+  // Ref para mantener siempre la versión más reciente de onMapClick
+  const onMapClickRef = useRef(onMapClick);
+
+  // Actualizar la ref cada vez que cambie el prop
+  useEffect(() => {
+    onMapClickRef.current = onMapClick;
+  }, [onMapClick]);
   
   // Guardamos L en una ref para acceso posterior
   const LRef = useRef(null);
@@ -78,8 +86,9 @@ const MapViewer = forwardRef(({
     pointsLayerGroupRef.current = L.layerGroup().addTo(map);
 
     // Eventos del mapa
+    // Usamos ref para que siempre se llame la versión más reciente del callback
     map.on('click', (e) => {
-      if (onMapClick) onMapClick(e.latlng);
+      if (onMapClickRef.current) onMapClickRef.current(e.latlng);
     });
 
     map.on('zoomend', () => {
@@ -219,62 +228,95 @@ const MapViewer = forwardRef(({
         
         const displayNum = pt.localNumber || pt.number || '';
         
-        const pointIcon = L.divIcon({
-          className: 'fault-point-wrapper',
-          html: `<div class="fault-marker" style="background-color: #f44336; color: white; border-radius: 50%; width: 24px; height: 24px; display: flex; justify-content: center; align-items: center; font-weight: bold; font-size: 12px; border: 2px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.5);">${displayNum}</div>`,
-          iconSize: [24, 24],
-          iconAnchor: [12, 12]
-        });
+        let coordsList = [];
+        if (Array.isArray(pt.coords)) {
+          if (Array.isArray(pt.coords[0])) {
+            coordsList = pt.coords.map(c => fixCoord(c));
+          } else {
+            coordsList = [fixCoord(pt.coords)];
+          }
+        }
 
-        const marker = L.marker(pt.coords, { icon: pointIcon }).addTo(pointsGroup);
-        
-        const fotosHtml = (pt.fotos && pt.fotos.length > 0)
-          ? `<div style="display:flex; gap:4px; margin-top:6px; overflow-x:auto;">
-              ${pt.fotos.map(f => `<a href="${f.url}" target="_blank"><img src="${f.url}" style="width:45px; height:45px; object-fit:cover; border-radius:4px; border:1px solid #0077c2;" title="${f.name}"></a>`).join('')}
-             </div>`
-          : '';
+        if (coordsList.length === 0) return;
 
-        // Popup contenido
-        const popupContent = `
-          <div style="min-width: 210px; font-size: 11px;">
-            <h4 style="margin: 0 0 6px 0; border-bottom: 1px solid #ccc; padding-bottom: 4px; color:#d32f2f;">📍 Falla #${displayNum}</h4>
-            <p style="margin: 3px 0;"><b>Ticket:</b> ${pt.ticket || '-'}</p>
-            <p style="margin: 3px 0;"><b>Falla Real:</b> ${pt.falla || pt.fallaReal || '-'}</p>
-            <p style="margin: 3px 0;"><b>Suministro:</b> ${pt.suministro || '-'}</p>
-            ${fotosHtml}
-            ${!isPresentationMode ? `<button class="edit-btn-popup" data-id="${pt.originalIndex}" style="margin-top: 8px; width: 100%; padding: 5px; background: #0288d1; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight:bold;">📝 Editar Datos / Fotos</button>` : ''}
-          </div>
-        `;
-        
-        marker.bindPopup(popupContent);
-        
-        marker.on('click', () => {
-          if (onPointClick) onPointClick(pt.originalIndex);
+        // Si la falla tiene múltiples puntos de arreglo, trazar línea punteada de conexión
+        if (coordsList.length > 1) {
+          L.polyline(coordsList, {
+            color: '#f44336',
+            dashArray: '6, 6',
+            weight: 2.5,
+            opacity: 0.85
+          }).addTo(pointsGroup);
+        }
+
+        coordsList.forEach((coord, subIdx) => {
+          const pointIcon = L.divIcon({
+            className: 'fault-point-wrapper',
+            html: `<div class="fault-marker" style="background-color: #f44336; color: white; border-radius: 50%; width: 25px; height: 25px; display: flex; justify-content: center; align-items: center; font-weight: bold; font-size: 12px; border: 2px solid white; box-shadow: 0 0 5px rgba(0,0,0,0.6);">${displayNum}</div>`,
+            iconSize: [25, 25],
+            iconAnchor: [12.5, 12.5]
+          });
+
+          const marker = L.marker(coord, { icon: pointIcon }).addTo(pointsGroup);
           
-          // Agregamos listener para el botón editar en popup
-          setTimeout(() => {
-            const editBtn = document.querySelector(`.edit-btn-popup[data-id="${pt.originalIndex}"]`);
-            if (editBtn) {
-              editBtn.addEventListener('click', () => {
-                if (onPointClick) onPointClick(pt.originalIndex, 'edit');
-                mapInstanceRef.current.closePopup();
-              });
+          const subInfo = coordsList.length > 1 ? ` (Punto ${subIdx + 1} de ${coordsList.length})` : '';
+
+          const linkCroquis = pt.linkCroquis || pt.link_croquis || pt.croquis || '';
+
+          const croquisHtml = linkCroquis
+            ? `<div style="margin-top: 8px;">
+                <a href="${linkCroquis}" target="_blank" rel="noopener noreferrer" style="display: block; width: 100%; text-align: center; padding: 6px 8px; background: #00897b; color: white; border-radius: 4px; font-weight: bold; text-decoration: none; box-sizing: border-box;">
+                  🗺️ Abrir Link del Croquis (PDF) ↗
+                </a>
+               </div>`
+            : '<p style="margin: 4px 0; color: #888; font-style: italic;">Sin Link de Croquis</p>';
+
+          const notaHtml = pt.nota ? `<p style="margin: 3px 0;"><b>📝 Nota Específica:</b> ${pt.nota}</p>` : '';
+          const horaHtml = pt.horaInicio ? `<p style="margin: 3px 0;"><b>🕒 Hora de Inicio:</b> ${pt.horaInicio}</p>` : '';
+          const causaHtml = pt.causa ? `<p style="margin: 3px 0;"><b>💡 Causa:</b> ${pt.causa}</p>` : '';
+
+          const fotosHtml = (pt.fotos && pt.fotos.length > 0)
+            ? `<div style="display:flex; gap:4px; margin-top:6px; overflow-x:auto;">
+                ${pt.fotos.map(f => `<a href="${f.url}" target="_blank"><img src="${f.url}" style="width:45px; height:45px; object-fit:cover; border-radius:4px; border:1px solid #0077c2;" title="${f.name}"></a>`).join('')}
+               </div>`
+            : '';
+
+          const popupContent = `
+            <div style="min-width: 220px; max-width: 280px; font-size: 11px; line-height: 1.4;">
+              <h4 style="margin: 0 0 6px 0; border-bottom: 1px solid #ccc; padding-bottom: 4px; color:#d32f2f;">📍 Falla #${displayNum}${subInfo}</h4>
+              <p style="margin: 3px 0;"><b>Ticket:</b> ${pt.ticket || '-'}</p>
+              ${horaHtml}
+              <p style="margin: 3px 0;"><b>Falla Real:</b> ${pt.falla || pt.fallaReal || '-'}</p>
+              ${causaHtml}
+              <p style="margin: 3px 0;"><b>Suministro:</b> ${pt.suministro || '-'}</p>
+              ${notaHtml}
+              ${croquisHtml}
+              ${fotosHtml}
+              ${!isPresentationMode ? `<button class="edit-btn-popup" data-id="${pt.originalIndex}" style="margin-top: 8px; width: 100%; padding: 5px; background: #0288d1; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight:bold;">📝 Editar Datos / Fotos</button>` : ''}
+            </div>
+          `;
+          
+          marker.bindPopup(popupContent);
+          
+          marker.on('click', () => {
+            if (!isPresentationMode && onPointClick) {
+              onPointClick(pt.originalIndex);
             }
-          }, 100);
+          });
         });
       });
     }
   }, [faultPoints, isPresentationMode, onPointClick]);
 
-  // Manejar modo de añadir punto
+  // Manejar modo de añadir punto / reubicar
   useEffect(() => {
     if (!mapRef.current) return;
-    if (isAddPointMode) {
+    if (isAddPointMode || isRelocating) {
       mapRef.current.style.cursor = 'crosshair';
     } else {
       mapRef.current.style.cursor = '';
     }
-  }, [isAddPointMode]);
+  }, [isAddPointMode, isRelocating]);
 
   return <div id="map" ref={mapRef} style={{ width: '100%', height: '100%' }}></div>;
 });

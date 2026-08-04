@@ -20,8 +20,11 @@ export default function FaultForm({
     fallaReal: '',
     causa: '',
     nota: '',
+    linkCroquis: '',
     latitud: '',
-    longitud: ''
+    longitud: '',
+    latitud2: '',
+    longitud2: ''
   });
 
   const [fotos, setFotos] = useState([]);
@@ -31,6 +34,10 @@ export default function FaultForm({
   useEffect(() => {
     if (isOpen) {
       if (editingPoint) {
+        const isMulti = editingPoint.coords && Array.isArray(editingPoint.coords[0]);
+        const pt1 = isMulti ? editingPoint.coords[0] : editingPoint.coords;
+        const pt2 = isMulti ? editingPoint.coords[1] : null;
+
         setFormData({
           ticket: editingPoint.ticket || '',
           horaInicio: editingPoint.horaInicio || '',
@@ -42,8 +49,11 @@ export default function FaultForm({
           fallaReal: editingPoint.falla || editingPoint.fallaReal || '',
           causa: editingPoint.causa || '',
           nota: editingPoint.nota || '',
-          latitud: editingPoint.coords ? editingPoint.coords[0] : '',
-          longitud: editingPoint.coords ? editingPoint.coords[1] : ''
+          linkCroquis: editingPoint.linkCroquis || editingPoint.link_croquis || editingPoint.croquis || '',
+          latitud: pt1 ? pt1[0] : '',
+          longitud: pt1 ? pt1[1] : '',
+          latitud2: pt2 ? pt2[0] : '',
+          longitud2: pt2 ? pt2[1] : ''
         });
         setFotos(editingPoint.fotos || []);
       } else {
@@ -58,8 +68,11 @@ export default function FaultForm({
           fallaReal: '',
           causa: '',
           nota: '',
+          linkCroquis: '',
           latitud: '',
-          longitud: ''
+          longitud: '',
+          latitud2: '',
+          longitud2: ''
         });
         setFotos([]);
       }
@@ -140,7 +153,19 @@ export default function FaultForm({
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    onSave({ ...formData, fotos });
+
+    let coords = null;
+    if (formData.latitud && formData.longitud) {
+      const p1 = [parseFloat(formData.latitud), parseFloat(formData.longitud)];
+      if (formData.latitud2 && formData.longitud2) {
+        const p2 = [parseFloat(formData.latitud2), parseFloat(formData.longitud2)];
+        coords = [p1, p2];
+      } else {
+        coords = p1;
+      }
+    }
+
+    onSave({ ...formData, coords, fotos });
   };
 
   if (!isOpen) return null;
@@ -201,13 +226,27 @@ export default function FaultForm({
               <label>NOTA ESPECÍFICA DE REPARACIÓN:</label>
               <input type="text" id="nota" className="input-control" value={formData.nota} onChange={handleChange} placeholder="Ej: Empalme termocontraíble instalado y circuito restablecido" />
             </div>
+            <div className="form-group full-width">
+              <label style={{ color: 'var(--accent-cyan)' }}>🗺️ LINK DEL CROQUIS / MAPA:</label>
+              <input type="text" id="linkCroquis" className="input-control" value={formData.linkCroquis || ''} onChange={handleChange} placeholder="Ej: https://maps.google.com/?q=... o link al diagrama" />
+            </div>
             <div className="form-group">
-              <label>LATITUD (GPS):</label>
+              <label>LATITUD (Punto 1):</label>
               <input type="text" id="latitud" className="input-control" value={formData.latitud} onChange={handleChange} />
             </div>
             <div className="form-group">
-              <label>LONGITUD (GPS):</label>
+              <label>LONGITUD (Punto 1):</label>
               <input type="text" id="longitud" className="input-control" value={formData.longitud} onChange={handleChange} />
+            </div>
+
+            {/* SECCIÓN 2DO PUNTO DE ARREGLO (OPCIONAL) */}
+            <div className="form-group">
+              <label style={{ color: 'var(--accent-warning)' }}>LATITUD 2 (Empalme 2 - Opcional):</label>
+              <input type="text" id="latitud2" className="input-control" value={formData.latitud2} onChange={handleChange} placeholder="Ej: -11.9604" />
+            </div>
+            <div className="form-group">
+              <label style={{ color: 'var(--accent-warning)' }}>LONGITUD 2 (Empalme 2 - Opcional):</label>
+              <input type="text" id="longitud2" className="input-control" value={formData.longitud2} onChange={handleChange} placeholder="Ej: -76.9857" />
             </div>
 
             {/* SECCIÓN DE EVIDENCIAS FOTOGRÁFICAS DE CAMPO */}
