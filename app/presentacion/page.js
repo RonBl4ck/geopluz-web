@@ -5,6 +5,7 @@ import dynamic from 'next/dynamic';
 import PresentationHUD from '@/components/PresentationHUD';
 import PresentationTablePanel from '@/components/PresentationTablePanel';
 import { supabase } from '@/lib/supabase';
+import { exportExcelBySed } from '@/lib/excelUtils';
 
 // MapViewer importado dinámicamente para evitar SSR
 const MapViewer = dynamic(() => import('@/components/MapViewer'), { ssr: false });
@@ -75,7 +76,9 @@ export default function PresentacionPage() {
             llaveSistema: f.llave_code || '',
             llaveCampo: `${f.llave_code || ''} (Campo)`,
             falla: f.falla_real || '',
-            causa: f.causa || ''
+            causa: f.causa || '',
+            linkCroquis: f.link_croquis || '',
+            fotos: f.fotos || []
           }));
           setNumberedPointsList(points);
         }
@@ -111,6 +114,11 @@ export default function PresentacionPage() {
     if (mapRef.current && point.coords) {
       mapRef.current.flyTo(point.coords, 18);
     }
+  }
+
+  function handleExportExcel() {
+    const dataToExport = numberedPointsList.length > 0 ? numberedPointsList : filteredPoints;
+    exportExcelBySed(dataToExport, currentSedId);
   }
 
   // Navegación
@@ -166,17 +174,27 @@ export default function PresentacionPage() {
       </div>
       
       <PresentationHUD
+        sedId={currentSedId}
         sedName={localDatabase[currentSedId]?.name || currentSedId || 'Sin SED'}
         llaveName={currentLlaveId || 'Sin Llave'}
+        sedsList={sedsList}
+        onSelectSed={(sedId) => {
+          setCurrentSedId(sedId);
+          const llaves = Object.keys(localDatabase[sedId]?.llaves || {});
+          if (llaves.length > 0) setCurrentLlaveId(llaves[0]);
+          else setCurrentLlaveId('');
+        }}
         currentMapStyle={currentMapStyle}
         onPrevSed={() => navigateSed(-1)}
         onNextSed={() => navigateSed(1)}
         onToggleMapStyle={() => setCurrentMapStyle(s => s === 'clean' ? 'detailed' : 'clean')}
-        onExit={() => { window.location.href = '/'; }}
+        onEnterEditMode={() => { window.location.href = '/'; }}
+        onExportExcel={handleExportExcel}
       />
       <PresentationTablePanel
         points={filteredPoints}
         onRowClick={handleFlyToPoint}
+        onExportExcel={handleExportExcel}
       />
     </>
   );

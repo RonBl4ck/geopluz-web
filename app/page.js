@@ -2,11 +2,13 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import dynamic from 'next/dynamic';
+import * as XLSX from 'xlsx';
 import Sidebar from '@/components/Sidebar';
 import FaultForm from '@/components/FaultForm';
 import PresentationHUD from '@/components/PresentationHUD';
 import PresentationTablePanel from '@/components/PresentationTablePanel';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
+import { exportExcelBySed } from '@/lib/excelUtils';
 
 // MapViewer importado dinámicamente para evitar SSR
 const MapViewer = dynamic(() => import('@/components/MapViewer'), { ssr: false });
@@ -138,10 +140,13 @@ export default function Page() {
       reader.onload = (evt) => {
         try {
           const rawData = JSON.parse(evt.target.result);
-          mergeJsonData(rawData);
+          mergeJsonData(rawData, file.name);
         } catch(err) {
-          alert('Error al leer JSON: ' + err.message);
+          alert(`❌ Error al leer el archivo JSON "${file.name}":\n` + err.message);
         }
+      };
+      reader.onerror = () => {
+        alert(`❌ Error de lectura en "${file.name}". Es posible que el archivo esté bloqueado por el antivirus o por otra aplicación.`);
       };
       reader.readAsText(file);
     });
@@ -151,100 +156,94 @@ export default function Page() {
     if (!jsonText || !jsonText.trim()) return;
     try {
       const rawData = JSON.parse(jsonText.trim());
-      mergeJsonData(rawData);
+      mergeJsonData(rawData, 'Texto Pegado');
     } catch(err) {
-      alert('❌ Error al procesar el código JSON pegado. Verifique que el texto esté completo.\nDetalle: ' + err.message);
+      alert('❌ Error al procesar el código JSON pegado. Verifique que el formato esté completo y sea un JSON válido.\nDetalle: ' + err.message);
     }
   }
 
-  function mergeJsonData(rawData) {
-    // 1. Si contiene lista de fallas (o es un arreglo de registros de falla)
-    let incomingFallas = [];
-    if (Array.isArray(rawData) && rawData.length > 0 && (rawData[0].ticket || rawData[0].sedLlave || rawData[0].falla)) {
-      incomingFallas = rawData;
-    } else if (rawData.fallas && Array.isArray(rawData.fallas)) {
-      incomingFallas = rawData.fallas;
-    } else if (rawData.points && Array.isArray(rawData.points)) {
-      incomingFallas = rawData.points;
+  // Funciones auxiliares para extracción flexible de columnas/propiedades
+  function getFlexibleValue(obj, possibleKeys) {
+    if (!obj || typeof obj !== 'object') return '';
+    for (const k of possibleKeys) {
+      if (obj[k] !== undefined && obj[k] !== null && obj[k] !== '') {
+        return obj[k];
+      }
     }
+    const normalizedObj = {};
+    for (const key in obj) {
+      const normKey = key.toString().toLowerCase().replace(/[^a-z0-9]/g, '');
+      normalizedObj[normKey] = obj[key];
+    }
+    for (const k of possibleKeys) {
+      const normSearchKey = k.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (normalizedObj[normSearchKey] !== undefined && normalizedObj[normSearchKey] !== null && normalizedObj[normSearchKey] !== '') {
+        return normalizedObj[normSearchKey];
+      }
+    }
+    return '';
+  }
 
-    if (incomingFallas.length > 0) {
-      let addedCount = 0;
-      let skippedCount = 0;
+  function extractCoordsFromRow(row) {
+    let lat = parseFloat(getFlexibleValue(row, ['latitud', 'lat', 'y', 'latitud1']));
+    let lng = parseFloat(getFlexibleValue(row, ['longitud', 'lng', 'long', 'x', 'longitud1']));
 
-      setNumberedPointsList(prev => {
-        const existing = [...prev];
-        const existingTickets = new Set(existing.map(p => String(p.ticket).trim().toLowerCase()).filter(Boolean));
-
-        incomingFallas.forEach(pt => {
-          const rawTicket = String(pt.ticket || '').trim();
-          const ticketKey = rawTicket.toLowerCase();
-
-          if (ticketKey && existingTickets.has(ticketKey)) {
-            skippedCount++;
-            return;
+    if (isNaN(lat) || isNaN(lng)) {
+      const rawCoords = getFlexibleValue(row, ['coords', 'coordenadas', 'gps', 'location', 'coordenada']);
+      if (typeof rawCoords === 'string' && rawCoords.includes(',')) {
+        const parts = rawCoords.split(',');
+        if (parts.length >= 2) {
+          const pLat = parseFloat(parts[0].trim());
+          const pLng = parseFloat(parts[1].trim());
+          if (!isNaN(pLat) && !isNaN(pLng)) {
+            lat = pLat;
+            lng = pLng;
           }
-
-          if (ticketKey) existingTickets.add(ticketKey);
-
-          const pointNum = existing.length + 1;
-          existing.push({
-            number: pointNum,
-            coords: pt.coords || null,
-            ticket: pt.ticket || `TK-${pointNum}`,
-            horaInicio: pt.horaInicio || new Date().toLocaleString(),
-            zona: pt.zona || 'Zona Norte',
-            set: pt.set || 'SET',
-            alimentador: pt.alimentador || 'Alim',
-            nota: pt.nota || 'Falla atendida',
-            odm: pt.odm || 'ODM-000',
-            suministro: pt.suministro || 'N/A',
-            sedLlave: pt.sedLlave || '00007S-3SP',
-            sed: pt.sed || (pt.sedLlave ? pt.sedLlave.split('-')[0] : 'SED'),
-            llaveSistema: pt.llaveSistema || (pt.sedLlave ? pt.sedLlave.split('-')[1] : 'LLAVE'),
-            llaveCampo: pt.llaveCampo || `${pt.llaveSistema || 'LLAVE'} (Campo)`,
-            falla: pt.falla || pt.fallaReal || 'Avería reparada',
-            causa: pt.causa || 'Deterioro',
-            linkCroquis: pt.linkCroquis || pt.link_croquis || pt.croquis || '',
-            fotos: pt.fotos || []
-          });
-          addedCount++;
-        });
-
-        if (existing.length > 0 && incomingFallas[0]) {
-          const ptSed = incomingFallas[0].sed || (incomingFallas[0].sedLlave ? incomingFallas[0].sedLlave.split('-')[0] : null);
-          if (ptSed) setCurrentSedId(ptSed);
         }
-
-        return existing;
-      });
-
-      setTimeout(() => {
-        let msg = `✅ ¡FALLAS CARGADAS!\n\n• Agregados: ${addedCount} registro(s).`;
-        if (skippedCount > 0) {
-          msg += `\n• Omitidos por Ticket duplicado: ${skippedCount} registro(s).`;
-        }
-        alert(msg);
-      }, 100);
+      } else if (Array.isArray(rawCoords) && rawCoords.length >= 2 && typeof rawCoords[0] === 'number') {
+        lat = rawCoords[0];
+        lng = rawCoords[1];
+      }
     }
 
-    // 2. Si contiene estructura de red (SEDs y Llaves)
+    if (!isNaN(lat) && !isNaN(lng)) {
+      return [lat, lng];
+    }
+    return null;
+  }
+
+  function mergeJsonData(rawData, sourceName = 'Archivo') {
+    if (!rawData) {
+      alert(`⚠️ El contenido de ${sourceName} está vacío.`);
+      return;
+    }
+
+    let processedAny = false;
+
+    // 1. Estructura de red (SEDs y Llaves)
     let incoming = {};
-    if (rawData.seds && typeof rawData.seds === 'object') {
-      incoming = rawData.seds;
-    } else if (Array.isArray(rawData) && rawData.length > 0 && rawData[0].llaves) {
-      rawData.forEach(item => { if (item.id) incoming[item.id] = item; });
-    } else if (rawData.id && rawData.llaves) {
+    const rootSedsObj = rawData.seds || rawData.subestaciones || rawData.red || rawData.database;
+
+    if (rootSedsObj && typeof rootSedsObj === 'object' && !Array.isArray(rootSedsObj)) {
+      incoming = rootSedsObj;
+    } else if (Array.isArray(rawData)) {
+      // Si es un Array, comprobar si los elementos parecen SEDs (tienen 'llaves' o 'lines' o 'sedCoord')
+      const looksLikeSeds = rawData.length > 0 && (rawData[0].llaves || rawData[0].sedCoord || (rawData[0].id && !rawData[0].ticket && !rawData[0].falla));
+      if (looksLikeSeds) {
+        rawData.forEach(item => { if (item && item.id) incoming[item.id] = item; });
+      }
+    } else if (rawData.id && (rawData.llaves || rawData.sedCoord)) {
       incoming[rawData.id] = rawData;
-    } else if (!Array.isArray(rawData)) {
+    } else if (typeof rawData === 'object' && !Array.isArray(rawData)) {
       for (const k in rawData) {
-        if (typeof rawData[k] === 'object' && rawData[k].llaves) {
+        if (rawData[k] && typeof rawData[k] === 'object' && (rawData[k].llaves || rawData[k].sedCoord || k.endsWith('S') || k.startsWith('SED'))) {
           incoming[k] = rawData[k];
         }
       }
     }
 
     if (Object.keys(incoming).length > 0) {
+      processedAny = true;
       setLocalDatabase(prev => {
         const updated = { ...prev };
         for (const sedId in incoming) {
@@ -275,118 +274,175 @@ export default function Page() {
         const realCount = sedKeys.filter(k => k !== 'SED_ACTIVA').length || sedKeys.length;
 
         setTimeout(() => {
-          alert(`✅ ¡RED ELÉCTRICA CARGADA! Se detectaron ${realCount} Subestación(es) (SEDs) con sus llaves.`);
+          alert(`✅ ¡RED ELÉCTRICA CARGADA DESDE ${sourceName.toUpperCase()}!\n\nSe detectaron ${realCount} Subestación(es) (SEDs) con sus llaves.`);
         }, 100);
 
         return updated;
       });
     }
-  }
 
-  // Guardar en la Base Principal (Supabase) solicitando contraseña
-  async function handleSaveToMainDatabase() {
-    const allowed = await checkEditPermission();
-    if (!allowed) return;
-
-    if (!isSupabaseConfigured || !supabase) {
-      alert('ℹ️ MODO LOCAL ACTIVO:\n\nPara guardar permanentemente en la nube, configura las variables NEXT_PUBLIC_SUPABASE_URL y KEY en el archivo .env.local.');
-      return;
-    }
-
-    try {
-      await saveSedsToSupabase(localDatabase);
-      for (const pt of numberedPointsList) {
-        await saveFallaToSupabase(pt);
+    // 2. Detección flexible de fallas/puntos en el JSON
+    let incomingFallas = [];
+    if (rawData.fallas && Array.isArray(rawData.fallas)) {
+      incomingFallas = rawData.fallas;
+    } else if (rawData.points && Array.isArray(rawData.points)) {
+      incomingFallas = rawData.points;
+    } else if (rawData.incidencias && Array.isArray(rawData.incidencias)) {
+      incomingFallas = rawData.incidencias;
+    } else if (rawData.averias && Array.isArray(rawData.averias)) {
+      incomingFallas = rawData.averias;
+    } else if (rawData.records && Array.isArray(rawData.records)) {
+      incomingFallas = rawData.records;
+    } else if (rawData.data && Array.isArray(rawData.data)) {
+      incomingFallas = rawData.data;
+    } else if (rawData.type === 'FeatureCollection' && Array.isArray(rawData.features)) {
+      incomingFallas = rawData.features.map(f => ({
+        ...(f.properties || {}),
+        coords: f.geometry && f.geometry.coordinates ? [f.geometry.coordinates[1], f.geometry.coordinates[0]] : null
+      }));
+    } else if (Array.isArray(rawData)) {
+      const first = rawData[0];
+      if (first && (first.ticket || first.falla || first.falla_real || first.coords || first.latitud || first.incidencia || first.suministro)) {
+        incomingFallas = rawData;
       }
-      alert('☁️ ✅ ¡SINCRONIZACIÓN EXITOSA!\n\nTodos los datos de red y fallas atendidas se han guardado permanentemente en la Base de Datos Principal en Supabase.');
-    } catch(err) {
-      alert('❌ Error al sincronizar con Supabase: ' + err.message);
     }
-  }
 
-  async function saveSedsToSupabase(database) {
-    if (!isSupabaseConfigured || !supabase) return;
-    try {
-      for (const sedId in database) {
-        const sed = database[sedId];
-        await supabase.from('seds').upsert({
-          id: sedId,
-          name: sed.name || `SED ${sedId}`,
-          sed_coord: sed.sedCoord || null
+    let loadedFirstSed = null;
+
+    if (incomingFallas.length > 0) {
+      processedAny = true;
+      let addedCount = 0;
+      let skippedCount = 0;
+
+      setNumberedPointsList(prev => {
+        const existing = [...prev];
+        const existingTickets = new Set(existing.map(p => String(p.ticket).trim().toLowerCase()).filter(Boolean));
+
+        incomingFallas.forEach(pt => {
+          const ticketVal = String(getFlexibleValue(pt, ['ticket', 'nro', 'incidencia', 'id', 'nroticket'])).trim();
+          const ticketKey = ticketVal.toLowerCase();
+
+          if (ticketKey && existingTickets.has(ticketKey)) {
+            skippedCount++;
+            return;
+          }
+
+          if (ticketKey) existingTickets.add(ticketKey);
+
+          const coords = pt.coords || extractCoordsFromRow(pt);
+          const sedLlaveVal = String(getFlexibleValue(pt, ['sedllave', 'sed_llave', 'circuito']) || '00007S-3SP');
+          const partes = sedLlaveVal.split('-');
+          const sedVal = String(pt.sed || (partes[0] ? partes[0] : 'SED'));
+          const llaveSysVal = String(pt.llaveSistema || (partes[1] ? partes[1] : 'LLAVE'));
+
+          if (!loadedFirstSed && sedVal) {
+            loadedFirstSed = sedVal;
+          }
+
+          const pointNum = existing.length + 1;
+          existing.push({
+            number: pointNum,
+            coords: coords,
+            ticket: ticketVal || `TK-${pointNum}`,
+            horaInicio: String(getFlexibleValue(pt, ['horainicio', 'hora', 'fecha', 'inicio']) || new Date().toLocaleString()),
+            zona: String(getFlexibleValue(pt, ['zona', 'distrito', 'area']) || 'Zona Norte'),
+            set: String(getFlexibleValue(pt, ['set', 'subestacion']) || 'SET'),
+            alimentador: String(getFlexibleValue(pt, ['alimentador', 'alim', 'circuito']) || 'Alim'),
+            nota: String(getFlexibleValue(pt, ['nota', 'comentario', 'observacion']) || 'Falla atendida'),
+            odm: String(getFlexibleValue(pt, ['odm', 'orden']) || 'ODM-000'),
+            suministro: String(getFlexibleValue(pt, ['suministro', 'nis']) || 'N/A'),
+            sedLlave: sedLlaveVal,
+            sed: sedVal,
+            llaveSistema: llaveSysVal,
+            llaveCampo: String(pt.llaveCampo || `${llaveSysVal} (Campo)`),
+            falla: String(getFlexibleValue(pt, ['falla', 'fallareal', 'averia', 'descripcion']) || 'Avería reparada'),
+            causa: String(getFlexibleValue(pt, ['causa', 'diagnostico']) || 'Deterioro'),
+            linkCroquis: String(getFlexibleValue(pt, ['linkcroquis', 'croquis', 'link', 'mapa', 'url']) || ''),
+            fotos: pt.fotos || []
+          });
+          addedCount++;
         });
-        
-        for (const llaveCode in sed.llaves) {
-          const llave = sed.llaves[llaveCode];
-          await supabase.from('llaves').upsert({
-            sed_id: sedId,
-            llave_code: llaveCode,
-            name: llave.name || llaveCode,
-            lines_data: llave.lines || []
-          }, { onConflict: 'sed_id,llave_code' });
-        }
+
+        return existing;
+      });
+
+      if (loadedFirstSed) {
+        setCurrentSedId(loadedFirstSed);
       }
-    } catch(err) {
-      console.warn('Error guardando en Supabase:', err.message);
+
+      setTimeout(() => {
+        let msg = `✅ ¡FALLAS CARGADAS DESDE ${sourceName.toUpperCase()}!\n\n• Agregados: ${addedCount} registro(s).`;
+        if (skippedCount > 0) {
+          msg += `\n• Omitidos por Ticket duplicado: ${skippedCount} registro(s).`;
+        }
+        alert(msg);
+      }, 100);
+    }
+
+    if (!processedAny) {
+      const topKeys = typeof rawData === 'object' && rawData !== null ? Object.keys(rawData).slice(0, 8).join(', ') : 'Ninguna';
+      alert(`⚠️ El archivo "${sourceName}" fue leído correctamente, pero su estructura no fue reconocida como Red de SEDs ni Registro de Fallas.\n\n• Claves encontradas en la raíz del JSON: [${topKeys}]\n\nSi el explorador bloquea el archivo, puede usar el botón 'Pegar JSON'.`);
     }
   }
 
   // Importación Excel
-  async function handleImportExcel(file) {
-    const allowed = await checkEditPermission();
-    if (!allowed) return;
+  function handleImportExcel(file) {
+    if (!file) return;
     const reader = new FileReader();
     reader.onload = (evt) => {
       try {
-        const XLSX = require('xlsx');
         const data = new Uint8Array(evt.target.result);
         const workbook = XLSX.read(data, { type: 'array' });
         let importedPoints = 0;
         let skippedPoints = 0;
         const newPoints = [...numberedPointsList];
         const existingTickets = new Set(newPoints.map(p => String(p.ticket).trim().toLowerCase()).filter(Boolean));
-        
+        let firstImportedSed = null;
+
         workbook.SheetNames.forEach(sheetName => {
           const worksheet = workbook.Sheets[sheetName];
           const jsonRows = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
-          
-          jsonRows.forEach(row => {
-            const ticket = row['Ticket'] || row['TICKET'] || row['ticket'] || '';
-            const lat = parseFloat(row['Latitud'] || row['LATITUD'] || row['Lat'] || row['lat']);
-            const lng = parseFloat(row['Longitud'] || row['LONGITUD'] || row['Lng'] || row['lng']);
-            
-            if (ticket || (!isNaN(lat) && !isNaN(lng))) {
-              const rawTicket = String(ticket || '').trim();
-              const ticketKey = rawTicket.toLowerCase();
 
+          jsonRows.forEach(row => {
+            const ticket = String(getFlexibleValue(row, ['ticket', 'nro', 'incidencia', 'id', 'nroticket'])).trim();
+            const coords = extractCoordsFromRow(row);
+
+            if (ticket || coords) {
+              const ticketKey = ticket.toLowerCase();
               if (ticketKey && existingTickets.has(ticketKey)) {
                 skippedPoints++;
                 return;
               }
-
               if (ticketKey) existingTickets.add(ticketKey);
 
-              const sedLlaveVal = row['Sed-Llave'] || row['SED-LLAVE'] || sheetName || '00007S-5SP';
+              const sedLlaveVal = String(getFlexibleValue(row, ['sedllave', 'sed_llave', 'circuito']) || sheetName || '00007S-5SP');
               const partes = sedLlaveVal.split('-');
-              
+              const sedVal = partes[0] || '00007S';
+              const llaveVal = partes[1] || '5SP';
+
+              if (!firstImportedSed && sedVal) {
+                firstImportedSed = sedVal;
+              }
+
               const pointNum = newPoints.length + 1;
               const pointData = {
                 number: pointNum,
-                coords: (!isNaN(lat) && !isNaN(lng)) ? [lat, lng] : null,
-                ticket: String(ticket || `TK-${Math.floor(Math.random()*90000+10000)}`),
-                horaInicio: String(row['Hora de inicio'] || row['HORA INICIO'] || new Date().toLocaleString()),
-                zona: String(row['Zona'] || row['ZONA'] || 'Zona Centro'),
-                set: String(row['SET'] || row['set'] || 'SET'),
-                alimentador: String(row['Alimentador'] || row['ALIMENTADOR'] || 'Alim'),
-                nota: String(row['Nota específica'] || row['NOTA'] || 'Falla atendida'),
-                odm: String(row['ODM'] || row['odm'] || 'ODM-000'),
-                suministro: String(row['Suministro'] || row['SUMINISTRO'] || 'N/A'),
+                coords: coords,
+                ticket: ticket || `TK-${Math.floor(Math.random()*90000+10000)}`,
+                horaInicio: String(getFlexibleValue(row, ['horainicio', 'hora', 'fecha', 'inicio']) || new Date().toLocaleString()),
+                zona: String(getFlexibleValue(row, ['zona', 'distrito', 'area']) || 'Zona Centro'),
+                set: String(getFlexibleValue(row, ['set', 'subestacion']) || 'SET'),
+                alimentador: String(getFlexibleValue(row, ['alimentador', 'alim', 'circuito']) || 'Alim'),
+                nota: String(getFlexibleValue(row, ['nota', 'comentario', 'observacion']) || 'Falla atendida'),
+                odm: String(getFlexibleValue(row, ['odm', 'orden']) || 'ODM-000'),
+                suministro: String(getFlexibleValue(row, ['suministro', 'nis']) || 'N/A'),
                 sedLlave: sedLlaveVal,
-                sed: partes[0] || '00007S',
-                llaveSistema: partes[1] || '5SP',
-                llaveCampo: `${partes[1] || '5SP'} (Campo)`,
-                falla: String(row['Falla Real'] || row['FALLA REAL'] || 'Avería reparada'),
-                causa: String(row['Causa'] || row['CAUSA'] || 'Deterioro'),
-                linkCroquis: String(row['Link del Croquis'] || row['LINK DEL CROQUIS'] || row['Croquis'] || row['CROQUIS'] || row['Link'] || row['LINK'] || '')
+                sed: sedVal,
+                llaveSistema: llaveVal,
+                llaveCampo: `${llaveVal} (Campo)`,
+                falla: String(getFlexibleValue(row, ['falla', 'fallareal', 'averia', 'descripcion']) || 'Avería reparada'),
+                causa: String(getFlexibleValue(row, ['causa', 'diagnostico']) || 'Deterioro'),
+                linkCroquis: String(getFlexibleValue(row, ['linkcroquis', 'croquis', 'link', 'mapa', 'url']) || '')
               };
               newPoints.push(pointData);
               importedPoints++;
@@ -394,8 +450,13 @@ export default function Page() {
             }
           });
         });
-        
+
         setNumberedPointsList(newPoints);
+
+        if (firstImportedSed) {
+          setCurrentSedId(firstImportedSed);
+        }
+
         let msg = `✅ EXCEL IMPORTADO:\n\n• Agregados: ${importedPoints} registros.`;
         if (skippedPoints > 0) {
           msg += `\n• Omitidos por Ticket duplicado: ${skippedPoints} registros.`;
@@ -419,15 +480,8 @@ export default function Page() {
   }
 
   function handleExportExcel() {
-    try {
-      const XLSX = require('xlsx');
-      const ws = XLSX.utils.json_to_sheet(numberedPointsList);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, "Fallas");
-      XLSX.writeFile(wb, "geopluz_fallas.xlsx");
-    } catch(err) {
-      alert('Error exportando a Excel: ' + err.message);
-    }
+    const dataToExport = numberedPointsList.length > 0 ? numberedPointsList : filteredPoints;
+    exportExcelBySed(dataToExport, currentSedId);
   }
 
   // Permisos de edición
@@ -626,8 +680,66 @@ export default function Page() {
     alert('Haz clic en el mapa en la nueva ubicación.');
   }
 
-  function handleSedDragEnd(sedId, latlng) {
-    if (!checkEditPermission()) return;
+  async function saveSedsToSupabase(sedsToSave) {
+    if (!isSupabaseConfigured || !supabase) {
+      try {
+        await fetch('/api/seds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(sedsToSave)
+        });
+      } catch (err) {
+        console.warn('Error guardando SEDs vía API:', err.message);
+      }
+      return;
+    }
+    try {
+      for (const sedId in sedsToSave) {
+        const sed = sedsToSave[sedId];
+        await supabase.from('seds').upsert({
+          id: sedId,
+          name: sed.name || `SED ${sedId}`,
+          sed_coord: sed.sedCoord || null
+        });
+        
+        if (sed.llaves) {
+          for (const llaveCode in sed.llaves) {
+            const llave = sed.llaves[llaveCode];
+            await supabase.from('llaves').upsert({
+              sed_id: sedId,
+              llave_code: llaveCode,
+              name: llave.name || llaveCode,
+              lines_data: llave.lines || []
+            }, { onConflict: 'sed_id,llave_code' });
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('Error guardando SEDs en Supabase:', err.message);
+    }
+  }
+
+  async function handleSaveToMainDatabase() {
+    const allowed = await checkEditPermission();
+    if (!allowed) return;
+
+    try {
+      await saveSedsToSupabase(localDatabase);
+
+      if (numberedPointsList.length > 0) {
+        for (const point of numberedPointsList) {
+          await saveFallaToSupabase(point);
+        }
+      }
+      alert('✅ ¡Datos sincronizados exitosamente con la Base de Datos Principal en la Nube!');
+    } catch (err) {
+      alert('❌ Error al guardar en la Base Principal: ' + err.message);
+    }
+  }
+
+  async function handleSedDragEnd(sedId, latlng) {
+    const allowed = await checkEditPermission();
+    if (!allowed) return;
     const updated = { ...localDatabase };
     if (updated[sedId]) {
       updated[sedId].sedCoord = [latlng.lat, latlng.lng];
@@ -750,10 +862,12 @@ export default function Page() {
             onNextSed={() => navigateSed(1)}
             onToggleMapStyle={() => setCurrentMapStyle(s => s === 'clean' ? 'detailed' : 'clean')}
             onEnterEditMode={handleEnterEditMode}
+            onExportExcel={handleExportExcel}
           />
           <PresentationTablePanel
             points={filteredPoints}
             onRowClick={handleFlyToPoint}
+            onExportExcel={handleExportExcel}
           />
         </>
       )}
