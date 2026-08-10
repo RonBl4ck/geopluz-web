@@ -7,6 +7,7 @@ import Sidebar from '@/components/Sidebar';
 import FaultForm from '@/components/FaultForm';
 import PresentationHUD from '@/components/PresentationHUD';
 import PresentationTablePanel from '@/components/PresentationTablePanel';
+import TicketConflictModal from '@/components/TicketConflictModal';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import { exportExcelBySed } from '@/lib/excelUtils';
 
@@ -17,6 +18,11 @@ export default function Page() {
   // Estado de Datos
   const [localDatabase, setLocalDatabase] = useState({});
   const [numberedPointsList, setNumberedPointsList] = useState([]);
+
+  // Estado de Conflictos de JSON (Centro de Control)
+  const [conflictsList, setConflictsList] = useState([]);
+  const [isConflictModalOpen, setIsConflictModalOpen] = useState(false);
+  const [currentSourceName, setCurrentSourceName] = useState('');
 
   // Estado de Navegación
   const [currentSedId, setCurrentSedId] = useState('');
@@ -312,22 +318,20 @@ export default function Page() {
     if (incomingFallas.length > 0) {
       processedAny = true;
       let addedCount = 0;
-      let skippedCount = 0;
+      const detectedConflicts = [];
 
       setNumberedPointsList(prev => {
         const existing = [...prev];
-        const existingTickets = new Set(existing.map(p => String(p.ticket).trim().toLowerCase()).filter(Boolean));
+        const existingMap = new Map();
+        existing.forEach(p => {
+          if (p.ticket) {
+            existingMap.set(String(p.ticket).trim().toLowerCase(), p);
+          }
+        });
 
         incomingFallas.forEach(pt => {
           const ticketVal = String(getFlexibleValue(pt, ['ticket', 'nro', 'incidencia', 'id', 'nroticket'])).trim();
-          const ticketKey = ticketVal.toLowerCase();
-
-          if (ticketKey && existingTickets.has(ticketKey)) {
-            skippedCount++;
-            return;
-          }
-
-          if (ticketKey) existingTickets.add(ticketKey);
+          const ticketKey = ticketVal ? ticketVal.toLowerCase() : '';
 
           const coords = pt.coords || extractCoordsFromRow(pt);
           const sedLlaveVal = String(getFlexibleValue(pt, ['sedllave', 'sed_llave', 'circuito']) || '00007S-3SP');
@@ -339,11 +343,9 @@ export default function Page() {
             loadedFirstSed = sedVal;
           }
 
-          const pointNum = existing.length + 1;
-          existing.push({
-            number: pointNum,
+          const preparedPoint = {
             coords: coords,
-            ticket: ticketVal || `TK-${pointNum}`,
+            ticket: ticketVal || `TK-${existing.length + 1}`,
             horaInicio: String(getFlexibleValue(pt, ['horainicio', 'hora', 'fecha', 'inicio']) || new Date().toLocaleString()),
             zona: String(getFlexibleValue(pt, ['zona', 'distrito', 'area']) || 'Zona Norte'),
             set: String(getFlexibleValue(pt, ['set', 'subestacion']) || 'SET'),
@@ -359,8 +361,23 @@ export default function Page() {
             causa: String(getFlexibleValue(pt, ['causa', 'diagnostico']) || 'Deterioro'),
             linkCroquis: String(getFlexibleValue(pt, ['linkcroquis', 'croquis', 'link', 'mapa', 'url']) || ''),
             fotos: pt.fotos || []
-          });
-          addedCount++;
+          };
+
+          if (ticketKey && existingMap.has(ticketKey)) {
+            // Detectado duplicado para el Centro de Control
+            detectedConflicts.push({
+              ticketKey: ticketKey,
+              existing: existingMap.get(ticketKey),
+              incoming: preparedPoint
+            });
+          } else {
+            // Nuevo registro sin conflicto
+            const pointNum = existing.length + 1;
+            const newPoint = { ...preparedPoint, number: pointNum };
+            existing.push(newPoint);
+            if (ticketKey) existingMap.set(ticketKey, newPoint);
+            addedCount++;
+          }
         });
 
         return existing;
@@ -370,13 +387,15 @@ export default function Page() {
         setCurrentSedId(loadedFirstSed);
       }
 
-      setTimeout(() => {
-        let msg = `✅ ¡FALLAS CARGADAS DESDE ${sourceName.toUpperCase()}!\n\n• Agregados: ${addedCount} registro(s).`;
-        if (skippedCount > 0) {
-          msg += `\n• Omitidos por Ticket duplicado: ${skippedCount} registro(s).`;
-        }
-        alert(msg);
-      }, 100);
+      if (detectedConflicts.length > 0) {
+        setConflictsList(detectedConflicts);
+        setCurrentSourceName(sourceName);
+        setIsConflictModalOpen(true);
+      } else {
+        setTimeout(() => {
+          alert(`✅ ¡FALLAS CARGADAS DESDE ${sourceName.toUpperCase()}!\n\n• Agregados: ${addedCount} registro(s) nuevo(s).`);
+        }, 100);
+      }
     }
 
     if (!processedAny) {
@@ -384,6 +403,43 @@ export default function Page() {
       alert(`⚠️ El archivo "${sourceName}" fue leído correctamente, pero su estructura no fue reconocida como Red de SEDs ni Registro de Fallas.\n\n• Claves encontradas en la raíz del JSON: [${topKeys}]\n\nSi el explorador bloquea el archivo, puede usar el botón 'Pegar JSON'.`);
     }
   }
+
+  // Manejo de Selección de Datos (A vs B)
+  const handleResolveConflicts = (decisions) => {
+    let replacedCount = 0;
+    let keptCount = 0;
+
+    setNumberedPointsList(prev => {
+      const updated = prev.map(pt => {
+        const tKey = String(pt.ticket).trim().toLowerCase();
+        const decision = decisions[tKey];
+        if (!decision) return pt;
+
+        const conflict = conflictsList.find(c => c.ticketKey === tKey);
+        if (!conflict) return pt;
+
+        if (decision === 'B') {
+          replacedCount++;
+          return {
+            ...pt,
+            ...conflict.incoming,
+            number: pt.number // Preservar posición
+          };
+        } else {
+          keptCount++;
+          return pt;
+        }
+      });
+      return updated;
+    });
+
+    setIsConflictModalOpen(false);
+    setConflictsList([]);
+
+    setTimeout(() => {
+      alert(`✅ ¡SELECCIÓN APLICADA CON ÉXITO!\n\n• Conservados con el Registro Existente (Dato A): ${keptCount}\n• Reemplazados por el Nuevo del JSON (Dato B): ${replacedCount}`);
+    }, 100);
+  };
 
   // Importación Excel
   function handleImportExcel(file) {
@@ -878,6 +934,12 @@ export default function Page() {
         onSave={handleSavePoint}
         editingPoint={editingPointIndex !== null ? numberedPointsList[editingPointIndex] : null}
         defaultSedLlave={`${currentSedId}-${currentLlaveId}`}
+      />
+
+      <TicketConflictModal
+        isOpen={isConflictModalOpen}
+        conflicts={conflictsList}
+        onResolveAll={handleResolveConflicts}
       />
     </>
   );
