@@ -26,6 +26,16 @@ const MapViewer = forwardRef(({
   const networkLayerGroupRef = useRef(null);
   const pointsLayerGroupRef = useRef(null);
   const sedMarkerRef = useRef(null);
+  const [sedsMasterDB, setSedsMasterDB] = useState({});
+  const [mapViewport, setMapViewport] = useState({ bounds: null, zoom: MAP_DEFAULT_ZOOM });
+
+  useEffect(() => {
+    fetch('/seds_master_db.min.json')
+      .then(res => res.ok ? res.json() : {})
+      .then(data => setSedsMasterDB(data))
+      .catch(err => console.warn('No se pudo cargar seds_master_db.min.json:', err));
+  }, []);
+
   // Ref para mantener siempre la versión más reciente de onMapClick
   const onMapClickRef = useRef(onMapClick);
 
@@ -86,20 +96,24 @@ const MapViewer = forwardRef(({
     pointsLayerGroupRef.current = L.layerGroup().addTo(map);
 
     // Eventos del mapa
-    // Usamos ref para que siempre se llame la versión más reciente del callback
     map.on('click', (e) => {
       if (onMapClickRef.current) onMapClickRef.current(e.latlng);
     });
 
-    map.on('zoomend', () => {
+    const updateViewport = () => {
       const zoom = map.getZoom();
+      const bounds = map.getBounds();
+      setMapViewport({ bounds, zoom });
+      
       const weight = getWeightForZoom(zoom);
       networkLayerGroupRef.current.eachLayer((layer) => {
         if (layer instanceof L.Polyline) {
           layer.setStyle({ weight });
         }
       });
-    });
+    };
+
+    map.on('zoomend moveend', updateViewport);
 
     mapInstanceRef.current = map;
 
@@ -172,7 +186,23 @@ const MapViewer = forwardRef(({
       });
     }
 
-    const fixedSedCoord = sedCoord ? fixCoord(sedCoord) : null;
+    let masterSed = null;
+    if (sedId && sedsMasterDB) {
+      masterSed = sedsMasterDB[sedId] || 
+                sedsMasterDB[sedId.replace(/^0+/, '')] || 
+                sedsMasterDB[sedId + 'S'] || 
+                sedsMasterDB[sedId.padStart(6, '0')];
+      if (!masterSed) {
+        const keys = Object.keys(sedsMasterDB);
+        const foundKey = keys.find(k => k.includes(sedId) || sedId.includes(k));
+        if (foundKey) masterSed = sedsMasterDB[foundKey];
+      }
+    }
+
+    let fixedSedCoord = sedCoord ? fixCoord(sedCoord) : null;
+    if (!fixedSedCoord && masterSed && masterSed.lat && masterSed.lng) {
+      fixedSedCoord = [masterSed.lat, masterSed.lng];
+    }
 
     if (fixedSedCoord && fixedSedCoord[0] !== 0 && fixedSedCoord[1] !== 0) {
       const sedIcon = L.divIcon({
@@ -189,12 +219,22 @@ const MapViewer = forwardRef(({
       }).addTo(networkGroup);
 
       if (sedId) {
-        sedMarkerRef.current.bindTooltip(`
-          <div style="font-size:11px;">
-            <b style="color:#ffab00;">⚡ SUBESTACIÓN (SED ${sedId})</b><br>
-            <span>💡 Arrastra este cuadrado amarillo si necesitas mover la SED</span>
-          </div>
-        `, { sticky: true });
+        let tooltipContent = `<div style="font-size:11px; max-width:240px;">
+          <b style="color:#ffab00;">⚡ SUBESTACIÓN (SED ${sedId})</b>`;
+
+        if (masterSed) {
+          tooltipContent += `<div style="margin-top:4px; border-top:1px dashed #bbb; padding-top:4px; font-size:10.5px; line-height:1.4;">
+            ${masterSed.cli !== undefined ? `<div>👥 <b>Clientes BT:</b> ${masterSed.cli.toLocaleString()}</div>` : ''}
+            ${masterSed.kva !== undefined ? `<div>⚡ <b>Potencia:</b> ${masterSed.kva} KVA (${masterSed.kv || 10} kV)</div>` : ''}
+            ${masterSed.tipo_const ? `<div>🏗️ <b>Construcción:</b> ${masterSed.tipo_const}</div>` : ''}
+            ${masterSed.dir ? `<div>📍 <b>Dirección:</b> ${masterSed.dir} (${masterSed.dist || ''})</div>` : ''}
+            ${masterSed.uo ? `<div>🏢 <b>UO:</b> ${masterSed.uo}</div>` : ''}
+          </div>`;
+        }
+
+        tooltipContent += `<div style="margin-top:4px; font-size:9.5px; color:#666;">💡 Arrastra este marcador si deseas ajustar su posición</div></div>`;
+
+        sedMarkerRef.current.bindTooltip(tooltipContent, { sticky: true });
       }
 
       sedMarkerRef.current.on('dragend', (e) => {
@@ -212,7 +252,7 @@ const MapViewer = forwardRef(({
     if (bounds.length > 0 && mapInstanceRef.current) {
       mapInstanceRef.current.fitBounds(bounds, { padding: [50, 50], maxZoom: 18, animate: true });
     }
-  }, [llaveData, sedCoord, sedId, currentTheme]);
+  }, [llaveData, sedCoord, sedId, currentTheme, sedsMasterDB]);
 
   // Dibujar puntos de falla
   useEffect(() => {
@@ -223,6 +263,14 @@ const MapViewer = forwardRef(({
     pointsGroup.clearLayers();
 
     if (faultPoints && faultPoints.length > 0) {
+      const mapBounds = mapViewport.bounds || (mapInstanceRef.current ? mapInstanceRef.current.getBounds() : null);
+      const currentZoom = mapViewport.zoom || (mapInstanceRef.current ? mapInstanceRef.current.getZoom() : MAP_DEFAULT_ZOOM);
+
+      // Si no hay SED seleccionada y el zoom está muy alejado (< 8), ocultar para no sobrecargar
+      if (!sedId && currentZoom < 8 && faultPoints.length > 10) {
+        return;
+      }
+
       faultPoints.forEach((pt) => {
         if (!pt.coords) return;
         
@@ -238,6 +286,12 @@ const MapViewer = forwardRef(({
         }
 
         if (coordsList.length === 0) return;
+
+        // BBOX Filtering: verificar si al menos 1 coordenada está dentro de la pantalla visible
+        if (mapBounds && !sedId && faultPoints.length > 15) {
+          const isVisible = coordsList.some(c => mapBounds.contains(L.latLng(c[0], c[1])));
+          if (!isVisible) return;
+        }
 
         // Si la falla tiene múltiples puntos de arreglo, trazar línea punteada de conexión
         if (coordsList.length > 1) {
@@ -306,7 +360,7 @@ const MapViewer = forwardRef(({
         });
       });
     }
-  }, [faultPoints, isPresentationMode, onPointClick]);
+  }, [faultPoints, isPresentationMode, onPointClick, mapViewport, sedId]);
 
   // Manejar modo de añadir punto / reubicar
   useEffect(() => {

@@ -10,6 +10,7 @@ import PresentationTablePanel from '@/components/PresentationTablePanel';
 import TicketConflictModal from '@/components/TicketConflictModal';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import { exportExcelBySed } from '@/lib/excelUtils';
+import { getCachedSeds, setCachedSeds } from '@/lib/dbCache';
 
 // MapViewer importado dinámicamente para evitar SSR
 const MapViewer = dynamic(() => import('@/components/MapViewer'), { ssr: false });
@@ -48,8 +49,18 @@ export default function Page() {
     loadData();
   }, []);
 
-  // Carga de Datos desde Supabase
+  // Carga de Datos desde IndexedDB Caché / Supabase
   async function loadData() {
+    // 1. Intentar cargar SEDS & Llaves desde caché IndexedDB primero para respuesta instantánea
+    try {
+      const cachedDb = await getCachedSeds();
+      if (cachedDb && Object.keys(cachedDb).length > 0) {
+        setLocalDatabase(cachedDb);
+      }
+    } catch (cErr) {
+      console.warn('Error leyendo caché IndexedDB:', cErr);
+    }
+
     if (!isSupabaseConfigured || !supabase) return;
     try {
       const { data: sedsData, error: sedsError } = await supabase.from('seds').select('*');
@@ -78,6 +89,8 @@ export default function Page() {
           });
         }
         setLocalDatabase(db);
+        // Guardar la versión actualizada en IndexedDB
+        setCachedSeds(db);
         
         if (fallasData) {
           const points = fallasData.map((f, i) => ({
@@ -105,7 +118,7 @@ export default function Page() {
         }
       }
     } catch (err) {
-      console.log('Supabase no disponible, modo local:', err.message);
+      console.log('Supabase no disponible, usando caché local:', err.message);
     }
   }
 
@@ -737,6 +750,9 @@ export default function Page() {
   }
 
   async function saveSedsToSupabase(sedsToSave) {
+    // Guardar en la caché local IndexedDB
+    setCachedSeds(sedsToSave);
+
     if (!isSupabaseConfigured || !supabase) {
       try {
         await fetch('/api/seds', {
@@ -750,25 +766,36 @@ export default function Page() {
       return;
     }
     try {
+      const sedsBatch = [];
+      const llavesBatch = [];
+
       for (const sedId in sedsToSave) {
         const sed = sedsToSave[sedId];
-        await supabase.from('seds').upsert({
+        sedsBatch.push({
           id: sedId,
           name: sed.name || `SED ${sedId}`,
           sed_coord: sed.sedCoord || null
         });
-        
+
         if (sed.llaves) {
           for (const llaveCode in sed.llaves) {
             const llave = sed.llaves[llaveCode];
-            await supabase.from('llaves').upsert({
+            llavesBatch.push({
               sed_id: sedId,
               llave_code: llaveCode,
               name: llave.name || llaveCode,
               lines_data: llave.lines || []
-            }, { onConflict: 'sed_id,llave_code' });
+            });
           }
         }
+      }
+
+      const CHUNK_SIZE = 500;
+      for (let i = 0; i < sedsBatch.length; i += CHUNK_SIZE) {
+        await supabase.from('seds').upsert(sedsBatch.slice(i, i + CHUNK_SIZE));
+      }
+      for (let i = 0; i < llavesBatch.length; i += CHUNK_SIZE) {
+        await supabase.from('llaves').upsert(llavesBatch.slice(i, i + CHUNK_SIZE), { onConflict: 'sed_id,llave_code' });
       }
     } catch (err) {
       console.warn('Error guardando SEDs en Supabase:', err.message);

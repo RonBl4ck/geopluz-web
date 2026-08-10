@@ -37,25 +37,47 @@ export async function GET() {
 export async function POST(request) {
   try {
     const db = await request.json();
+    const sedsBatch = [];
+    const llavesBatch = [];
+
     for (const sedId in db) {
       const sed = db[sedId];
-      await supabase.from('seds').upsert({
+      sedsBatch.push({
         id: sedId,
         name: sed.name || `SED ${sedId}`,
         sed_coord: sed.sedCoord || null
       });
-      
-      for (const llaveCode in sed.llaves) {
-        const llave = sed.llaves[llaveCode];
-        await supabase.from('llaves').upsert({
-          sed_id: sedId,
-          llave_code: llaveCode,
-          name: llave.name || llaveCode,
-          lines_data: llave.lines || []
-        }, { onConflict: 'sed_id,llave_code' });
+
+      if (sed.llaves) {
+        for (const llaveCode in sed.llaves) {
+          const llave = sed.llaves[llaveCode];
+          llavesBatch.push({
+            sed_id: sedId,
+            llave_code: llaveCode,
+            name: llave.name || llaveCode,
+            lines_data: llave.lines || []
+          });
+        }
       }
     }
-    return NextResponse.json({ success: true });
+
+    const CHUNK_SIZE = 500;
+
+    // Inserción en lote (Bulk Upsert) de SEDs
+    for (let i = 0; i < sedsBatch.length; i += CHUNK_SIZE) {
+      const chunk = sedsBatch.slice(i, i + CHUNK_SIZE);
+      const { error } = await supabase.from('seds').upsert(chunk);
+      if (error) throw error;
+    }
+
+    // Inserción en lote (Bulk Upsert) de Llaves
+    for (let i = 0; i < llavesBatch.length; i += CHUNK_SIZE) {
+      const chunk = llavesBatch.slice(i, i + CHUNK_SIZE);
+      const { error } = await supabase.from('llaves').upsert(chunk, { onConflict: 'sed_id,llave_code' });
+      if (error) throw error;
+    }
+
+    return NextResponse.json({ success: true, countSeds: sedsBatch.length, countLlaves: llavesBatch.length });
   } catch (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }

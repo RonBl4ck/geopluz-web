@@ -6,6 +6,7 @@ import PresentationHUD from '@/components/PresentationHUD';
 import PresentationTablePanel from '@/components/PresentationTablePanel';
 import { supabase } from '@/lib/supabase';
 import { exportExcelBySed } from '@/lib/excelUtils';
+import { getCachedSeds, setCachedSeds } from '@/lib/dbCache';
 
 // MapViewer importado dinámicamente para evitar SSR
 const MapViewer = dynamic(() => import('@/components/MapViewer'), { ssr: false });
@@ -30,6 +31,15 @@ export default function PresentacionPage() {
 
   // Carga de Datos desde Supabase
   async function loadData() {
+    try {
+      const cachedDb = await getCachedSeds();
+      if (cachedDb && Object.keys(cachedDb).length > 0) {
+        setLocalDatabase(cachedDb);
+      }
+    } catch (cErr) {
+      console.warn('Error leyendo caché IndexedDB:', cErr);
+    }
+
     try {
       const { data: sedsData, error: sedsError } = await supabase.from('seds').select('*');
       const { data: llavesData } = await supabase.from('llaves').select('*');
@@ -57,6 +67,7 @@ export default function PresentacionPage() {
           });
         }
         setLocalDatabase(db);
+        setCachedSeds(db);
         
         if (fallasData) {
           const points = fallasData.map((f, i) => ({

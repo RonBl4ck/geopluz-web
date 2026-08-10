@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import FaultTable from './FaultTable';
 
 export default function Sidebar({
@@ -36,6 +36,30 @@ export default function Sidebar({
   const excelInputRef = useRef(null);
   const [showJsonPasteModal, setShowJsonPasteModal] = useState(false);
   const [pastedJsonText, setPastedJsonText] = useState('');
+  const [sedsMasterDB, setSedsMasterDB] = useState({});
+
+  useEffect(() => {
+    fetch('/seds_master_db.min.json')
+      .then(res => res.ok ? res.json() : {})
+      .then(data => setSedsMasterDB(data))
+      .catch(err => console.warn('No se pudo cargar seds_master_db.min.json:', err));
+  }, []);
+
+  const getMasterSedInfo = (sedId) => {
+    if (!sedId || !sedsMasterDB || Object.keys(sedsMasterDB).length === 0) return null;
+    let master = sedsMasterDB[sedId] || 
+                 sedsMasterDB[sedId.replace(/^0+/, '')] || 
+                 sedsMasterDB[sedId + 'S'] || 
+                 sedsMasterDB[sedId.padStart(6, '0')];
+    if (!master) {
+      const keys = Object.keys(sedsMasterDB);
+      const foundKey = keys.find(k => k.includes(sedId) || sedId.includes(k));
+      if (foundKey) master = sedsMasterDB[foundKey];
+    }
+    return master;
+  };
+
+  const currentMasterSed = getMasterSedInfo(currentSedId);
 
   const handleProcessPastedJson = () => {
     if (!pastedJsonText.trim()) {
@@ -279,6 +303,25 @@ export default function Sidebar({
               )}
             </div>
           </div>
+
+          {currentMasterSed && (
+            <div style={{ marginTop: '10px', padding: '8px 10px', background: 'rgba(0,119,194,0.08)', border: '1px solid var(--border-color)', borderRadius: '6px', fontSize: '11px' }}>
+              <div style={{ fontWeight: 700, color: 'var(--accent-cyan)', marginBottom: '4px', display: 'flex', justifyContent: 'space-between' }}>
+                <span>📋 Ficha Técnica SED Master</span>
+                <span style={{ fontWeight: 600, fontSize: '10px', background: 'var(--accent-cyan)', color: '#fff', padding: '1px 6px', borderRadius: '10px' }}>
+                  {currentMasterSed.sheet || 'SP'}
+                </span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px', color: 'var(--text-main)' }}>
+                <div>👥 <b>Clientes BT:</b> {currentMasterSed.cli !== undefined ? currentMasterSed.cli.toLocaleString() : 'N/A'}</div>
+                <div>⚡ <b>Potencia:</b> {currentMasterSed.kva !== undefined ? `${currentMasterSed.kva} KVA` : 'N/A'} ({currentMasterSed.kv || 10} kV)</div>
+                <div>🏗️ <b>Tipo:</b> {currentMasterSed.tipo_const || currentMasterSed.tipo_sed || 'Superficie'}</div>
+                <div>🔌 <b>Alim.:</b> {currentMasterSed.alim || 'N/A'}</div>
+                <div style={{ gridColumn: 'span 2' }}>📍 <b>Dirección:</b> {currentMasterSed.dir || 'Sin registro'} ({currentMasterSed.dist || ''})</div>
+                <div style={{ gridColumn: 'span 2' }}>🏢 <b>UO:</b> {currentMasterSed.uo || 'UO COLONIAL'} {currentMasterSed.contratista ? `| ${currentMasterSed.contratista}` : ''}</div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Tarjeta 4: Registro de Fallas Reparadas */}
