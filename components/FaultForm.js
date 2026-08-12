@@ -1,6 +1,8 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import { FAULT_CAUSES, DEFAULT_CAUSE_COLOR } from '@/lib/constants';
+
 
 export default function FaultForm({
   isOpen,
@@ -219,8 +221,42 @@ export default function FaultForm({
               <input type="text" id="fallaReal" className="input-control" value={formData.fallaReal} onChange={handleChange} placeholder="Ej: Cable subterráneo dañado por excavación de terceros" />
             </div>
             <div className="form-group full-width">
-              <label>CAUSA / DIAGNÓSTICO:</label>
-              <input type="text" id="causa" className="input-control" value={formData.causa} onChange={handleChange} placeholder="Ej: Humedad / Sobrecarga en tramo crítico" />
+              <label>CAUSA / DIAGNÓSTICO ESTANDARIZADO:</label>
+              <div style={{ display: 'flex', gap: '8px', marginBottom: '6px' }}>
+                <select 
+                  className="input-control" 
+                  style={{ flex: '1', fontWeight: 'bold' }}
+                  value={
+                    FAULT_CAUSES.some(c => c.label === formData.causa) 
+                      ? formData.causa 
+                      : (formData.causa ? 'OTRO' : '')
+                  } 
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val && val !== 'OTRO') {
+                      setFormData(prev => ({ ...prev, causa: val }));
+                    } else if (val === 'OTRO') {
+                      setFormData(prev => ({ ...prev, causa: '' }));
+                    }
+                  }}
+                >
+                  <option value="">-- Seleccionar Causa Estandarizada --</option>
+                  {FAULT_CAUSES.map(c => (
+                    <option key={c.id} value={c.label}>
+                      ● {c.label}
+                    </option>
+                  ))}
+                  <option value="OTRO">⚪ OTRO / DIFERENTE (Escribir en texto)</option>
+                </select>
+              </div>
+              <input 
+                type="text" 
+                id="causa" 
+                className="input-control" 
+                value={formData.causa} 
+                onChange={handleChange} 
+                placeholder="Escribe la causa o detalle específico (Ej: Humedad / Sobrecarga)" 
+              />
             </div>
             <div className="form-group full-width">
               <label>NOTA ESPECÍFICA DE REPARACIÓN:</label>

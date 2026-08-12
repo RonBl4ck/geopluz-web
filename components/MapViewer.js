@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useRef, useImperativeHandle, forwardRef, useCallback } from 'react';
 import { fixCoord, getWeightForZoom } from '@/lib/coordUtils';
-import { TILE_LAYERS, MAP_DEFAULT_CENTER, MAP_DEFAULT_ZOOM, MAP_MAX_ZOOM } from '@/lib/constants';
+import { TILE_LAYERS, MAP_DEFAULT_CENTER, MAP_DEFAULT_ZOOM, MAP_MAX_ZOOM, FAULT_CAUSES, DEFAULT_CAUSE_COLOR, getCauseCategory } from '@/lib/constants';
+
 
 const MapViewer = forwardRef(({
   currentTheme,
@@ -28,6 +29,7 @@ const MapViewer = forwardRef(({
   const sedMarkerRef = useRef(null);
   const [sedsMasterDB, setSedsMasterDB] = useState({});
   const [mapViewport, setMapViewport] = useState({ bounds: null, zoom: MAP_DEFAULT_ZOOM });
+  const [showLegend, setShowLegend] = useState(true);
 
   useEffect(() => {
     fetch('/seds_master_db.min.json')
@@ -304,11 +306,15 @@ const MapViewer = forwardRef(({
         }
 
         coordsList.forEach((coord, subIdx) => {
+          const causeCat = getCauseCategory(pt.causa);
+          const markerBg = causeCat.color;
+          const markerTextColor = causeCat.textColor || '#ffffff';
+
           const pointIcon = L.divIcon({
             className: 'fault-point-wrapper',
-            html: `<div class="fault-marker" style="background-color: #f44336; color: white; border-radius: 50%; width: 25px; height: 25px; display: flex; justify-content: center; align-items: center; font-weight: bold; font-size: 12px; border: 2px solid white; box-shadow: 0 0 5px rgba(0,0,0,0.6);">${displayNum}</div>`,
-            iconSize: [25, 25],
-            iconAnchor: [12.5, 12.5]
+            html: `<div class="fault-marker" style="background-color: ${markerBg}; color: ${markerTextColor}; border-radius: 50%; width: 26px; height: 26px; display: flex; justify-content: center; align-items: center; font-weight: bold; font-size: 12px; border: 2px solid white; box-shadow: 0 0 6px rgba(0,0,0,0.6);">${displayNum}</div>`,
+            iconSize: [26, 26],
+            iconAnchor: [13, 13]
           });
 
           const marker = L.marker(coord, { icon: pointIcon }).addTo(pointsGroup);
@@ -327,7 +333,8 @@ const MapViewer = forwardRef(({
 
           const notaHtml = pt.nota ? `<p style="margin: 3px 0;"><b>📝 Nota Específica:</b> ${pt.nota}</p>` : '';
           const horaHtml = pt.horaInicio ? `<p style="margin: 3px 0;"><b>🕒 Hora de Inicio:</b> ${pt.horaInicio}</p>` : '';
-          const causaHtml = pt.causa ? `<p style="margin: 3px 0;"><b>💡 Causa:</b> ${pt.causa}</p>` : '';
+          const causaBadge = `<span style="display: inline-block; background-color: ${causeCat.color}; color: ${causeCat.textColor}; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 10px; margin-left: 4px;">${causeCat.label}</span>`;
+          const causaHtml = `<p style="margin: 3px 0;"><b>💡 Causa:</b> ${pt.causa || causeCat.label} ${causaBadge}</p>`;
 
           const fotosHtml = (pt.fotos && pt.fotos.length > 0)
             ? `<div style="display:flex; gap:4px; margin-top:6px; overflow-x:auto;">
@@ -372,7 +379,83 @@ const MapViewer = forwardRef(({
     }
   }, [isAddPointMode, isRelocating]);
 
-  return <div id="map" ref={mapRef} style={{ width: '100%', height: '100%' }}></div>;
+  return (
+    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+      <div id="map" ref={mapRef} style={{ width: '100%', height: '100%' }}></div>
+
+      {/* Leyenda de Causas de Falla */}
+      <div className="map-legend-container" style={{
+        position: 'absolute',
+        bottom: '24px',
+        left: '12px',
+        zIndex: 1000,
+        background: currentTheme === 'dark' ? 'rgba(18, 25, 44, 0.92)' : 'rgba(255, 255, 255, 0.95)',
+        backdropFilter: 'blur(8px)',
+        border: `1px solid ${currentTheme === 'dark' ? 'rgba(0, 229, 255, 0.3)' : '#cbd5e0'}`,
+        borderRadius: '8px',
+        boxShadow: '0 4px 15px rgba(0,0,0,0.25)',
+        padding: showLegend ? '10px 12px' : '6px 10px',
+        maxWidth: '250px',
+        transition: 'all 0.2s ease',
+        color: currentTheme === 'dark' ? '#e0f7fa' : '#1a202c',
+        fontSize: '11px',
+        userSelect: 'none'
+      }}>
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justify: 'space-between',
+          cursor: 'pointer',
+          fontWeight: 'bold',
+          fontSize: '11.5px',
+          borderBottom: showLegend ? `1px solid ${currentTheme === 'dark' ? 'rgba(255,255,255,0.1)' : '#e2e8f0'}` : 'none',
+          paddingBottom: showLegend ? '6px' : '0',
+          marginBottom: showLegend ? '8px' : '0'
+        }} onClick={() => setShowLegend(!showLegend)}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <i className="fa-solid fa-palette" style={{ color: 'var(--accent-cyan)' }}></i> Leyenda de Causas
+          </span>
+          <span style={{ fontSize: '10px', marginLeft: '8px', color: 'var(--accent-cyan)' }}>
+            {showLegend ? '▼' : '▲'}
+          </span>
+        </div>
+
+        {showLegend && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '5px', maxHeight: '220px', overflowY: 'auto' }}>
+            {FAULT_CAUSES.map(cause => (
+              <div key={cause.id} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{
+                  width: '12px',
+                  height: '12px',
+                  borderRadius: '50%',
+                  backgroundColor: cause.color,
+                  border: '1px solid rgba(0,0,0,0.25)',
+                  flexShrink: 0,
+                  boxShadow: '0 0 3px rgba(0,0,0,0.3)'
+                }}></span>
+                <span style={{ fontSize: '10.5px', fontWeight: 500 }}>{cause.label}</span>
+              </div>
+            ))}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', borderTop: `1px dashed ${currentTheme === 'dark' ? 'rgba(255,255,255,0.15)' : '#e2e8f0'}`, paddingTop: '4px', marginTop: '2px' }}>
+              <span style={{
+                width: '12px',
+                height: '12px',
+                borderRadius: '50%',
+                backgroundColor: DEFAULT_CAUSE_COLOR.color,
+                border: '1px solid rgba(0,0,0,0.25)',
+                flexShrink: 0,
+                boxShadow: '0 0 3px rgba(0,0,0,0.3)'
+              }}></span>
+              <span style={{ fontSize: '10.5px', fontStyle: 'italic', color: currentTheme === 'dark' ? '#90a4ae' : '#64748b' }}>
+                {DEFAULT_CAUSE_COLOR.label}
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
 });
 
 MapViewer.displayName = 'MapViewer';

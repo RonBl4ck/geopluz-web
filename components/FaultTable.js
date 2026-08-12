@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { getCauseCategory } from '@/lib/constants';
 
 export default function FaultTable({
   points = [],
@@ -62,6 +63,7 @@ export default function FaultTable({
             const isMulti = pt.coords && Array.isArray(pt.coords[0]);
             const hasCoords = pt.coords && (isMulti ? pt.coords.length > 0 : (!isNaN(pt.coords[0]) && !isNaN(pt.coords[1])));
             const fotosCount = pt.fotos ? pt.fotos.length : 0;
+            const causeCat = getCauseCategory(pt.causa);
 
             return (
               <tr 
@@ -77,7 +79,25 @@ export default function FaultTable({
                 </td>
                 <td>{pt.sedLlave}</td>
                 <td>{pt.falla || pt.fallaReal}</td>
-                <td>{pt.causa}</td>
+                <td>
+                  {pt.causa ? (
+                    <span style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      backgroundColor: causeCat.color,
+                      color: causeCat.textColor || '#ffffff',
+                      padding: '2px 8px',
+                      borderRadius: '10px',
+                      fontSize: '10px',
+                      fontWeight: 'bold',
+                      whiteSpace: 'nowrap',
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.2)'
+                    }}>
+                      {pt.causa}
+                    </span>
+                  ) : '-'}
+                </td>
+
                 <td style={{ fontSize: '10.5px', color: 'var(--text-muted)' }}>{pt.nota || '-'}</td>
                 <td>
                   {(pt.linkCroquis || pt.link_croquis || pt.croquis) ? (
