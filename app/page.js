@@ -684,10 +684,14 @@ export default function Page() {
       if (point.id) {
         await supabase.from('fallas').update(record).eq('id', point.id);
       } else {
-        const { data, error } = await supabase.from('fallas').insert(record).select();
+        let { data, error } = await supabase.from('fallas').upsert(record, { onConflict: 'ticket' }).select();
+        if (error) {
+          const res = await supabase.from('fallas').insert(record).select();
+          data = res.data;
+        }
         if (data && data.length > 0) {
             // Update the id of the point in state so future edits use update instead of insert
-            setNumberedPointsList(prev => prev.map(p => p.number === point.number ? { ...p, id: data[0].id } : p));
+            setNumberedPointsList(prev => prev.map(p => (p.ticket && p.ticket === point.ticket) || p.number === point.number ? { ...p, id: data[0].id } : p));
         }
       }
     } catch(err) {
@@ -807,11 +811,84 @@ export default function Page() {
     if (!allowed) return;
 
     try {
+      // 1. Guardar SEDs y Llaves en lote masivo
       await saveSedsToSupabase(localDatabase);
 
+      // 2. Guardar Fallas en lote masivo (Bulk Upsert)
       if (numberedPointsList.length > 0) {
-        for (const point of numberedPointsList) {
-          await saveFallaToSupabase(point);
+        const fallasBatch = numberedPointsList.map(point => {
+          const record = {
+            sed_id: point.sed,
+            llave_code: point.llaveSistema,
+            sed_llave: point.sedLlave,
+            ticket: point.ticket,
+            suministro: point.suministro,
+            falla_real: point.falla,
+            causa: point.causa,
+            nota: point.nota,
+            odm: point.odm,
+            zona: point.zona,
+            set_alimentador: `${point.set} / ${point.alimentador}`,
+            hora_inicio: point.horaInicio,
+            latitud: point.coords ? point.coords[0] : null,
+            longitud: point.coords ? point.coords[1] : null,
+            link_croquis: point.linkCroquis || null,
+            fotos: point.fotos || []
+          };
+          if (point.id) {
+            record.id = point.id;
+          }
+          return record;
+        });
+
+        if (isSupabaseConfigured && supabase) {
+          // Separar registros con ID (existentes) y registros sin ID (nuevos)
+          const withId = fallasBatch.filter(f => f.id);
+          const withoutId = fallasBatch.filter(f => !f.id);
+
+          let allSavedData = [];
+
+          // 1. Actualizar registros existentes que ya tienen ID
+          if (withId.length > 0) {
+            const { data: updatedData, error: errUpdate } = await supabase
+              .from('fallas')
+              .upsert(withId)
+              .select();
+            if (errUpdate) throw errUpdate;
+            if (updatedData) allSavedData = allSavedData.concat(updatedData);
+          }
+
+          // 2. Insertar o actualizar los registros nuevos (sin ID previo)
+          if (withoutId.length > 0) {
+            let { data: insertedData, error: errInsert } = await supabase
+              .from('fallas')
+              .upsert(withoutId, { onConflict: 'ticket' })
+              .select();
+
+            if (errInsert) {
+              console.warn('Upsert por ticket tuvo advertencia, intentando insert directo:', errInsert.message);
+              const resInsert = await supabase.from('fallas').insert(withoutId).select();
+              if (resInsert.error) throw resInsert.error;
+              insertedData = resInsert.data;
+            }
+
+            if (insertedData) allSavedData = allSavedData.concat(insertedData);
+          }
+
+          // 3. Mapear los IDs asignados por Supabase de vuelta a numberedPointsList
+          if (allSavedData.length > 0) {
+            const idMap = new Map(allSavedData.map(d => [String(d.ticket).trim().toLowerCase(), d.id]));
+            setNumberedPointsList(prev => prev.map(p => {
+              const key = String(p.ticket).trim().toLowerCase();
+              return idMap.has(key) ? { ...p, id: idMap.get(key) } : p;
+            }));
+          }
+        } else {
+          await fetch('/api/fallas', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(fallasBatch)
+          });
         }
       }
       alert('✅ ¡Datos sincronizados exitosamente con la Base de Datos Principal en la Nube!');
