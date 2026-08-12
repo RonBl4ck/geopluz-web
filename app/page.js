@@ -93,7 +93,27 @@ export default function Page() {
         setCachedSeds(db);
         
         if (fallasData) {
-          const points = fallasData.map((f, i) => ({
+          // Deduplicar registros de Supabase por Ticket (manteniendo el más reciente o con ID más alto)
+          const uniqueMap = new Map();
+          fallasData.forEach(f => {
+            const key = f.ticket ? String(f.ticket).trim().toLowerCase() : null;
+            if (key) {
+              if (!uniqueMap.has(key)) {
+                uniqueMap.set(key, f);
+              } else {
+                const existing = uniqueMap.get(key);
+                // Conservar el registro con mayor información o ID más reciente
+                if ((!existing.latitud && f.latitud) || (f.id && (!existing.id || f.id > existing.id))) {
+                  uniqueMap.set(key, f);
+                }
+              }
+            } else {
+              uniqueMap.set(`id_${f.id}`, f);
+            }
+          });
+
+          const deduplicatedFallas = Array.from(uniqueMap.values());
+          const points = deduplicatedFallas.map((f, i) => ({
             id: f.id,
             number: i + 1,
             coords: (f.latitud && f.longitud) ? [f.latitud, f.longitud] : null,
@@ -842,13 +862,65 @@ export default function Page() {
         });
 
         if (isSupabaseConfigured && supabase) {
-          // Separar registros con ID (existentes) y registros sin ID (nuevos)
+          // 1. Consultar a Supabase qué tickets ya existen en la BD para vincular sus IDs
+          const ticketsList = numberedPointsList.map(p => p.ticket).filter(Boolean);
+          let existingTicketsMap = new Map();
+
+          if (ticketsList.length > 0) {
+            const CHUNK_SIZE = 300;
+            for (let i = 0; i < ticketsList.length; i += CHUNK_SIZE) {
+              const chunk = ticketsList.slice(i, i + CHUNK_SIZE);
+              const { data: existingRows } = await supabase
+                .from('fallas')
+                .select('id, ticket')
+                .in('ticket', chunk);
+
+              if (existingRows) {
+                existingRows.forEach(row => {
+                  if (row.ticket) {
+                    existingTicketsMap.set(String(row.ticket).trim().toLowerCase(), row.id);
+                  }
+                });
+              }
+            }
+          }
+
+          // 2. Construir el lote de fallas asignando el ID de Supabase si el ticket ya existía
+          const fallasBatch = numberedPointsList.map(point => {
+            const tKey = point.ticket ? String(point.ticket).trim().toLowerCase() : '';
+            const existingId = point.id || existingTicketsMap.get(tKey);
+
+            const record = {
+              sed_id: point.sed,
+              llave_code: point.llaveSistema,
+              sed_llave: point.sedLlave,
+              ticket: point.ticket,
+              suministro: point.suministro,
+              falla_real: point.falla,
+              causa: point.causa,
+              nota: point.nota,
+              odm: point.odm,
+              zona: point.zona,
+              set_alimentador: `${point.set} / ${point.alimentador}`,
+              hora_inicio: point.horaInicio,
+              latitud: point.coords ? point.coords[0] : null,
+              longitud: point.coords ? point.coords[1] : null,
+              link_croquis: point.linkCroquis || null,
+              fotos: point.fotos || []
+            };
+            if (existingId) {
+              record.id = existingId;
+            }
+            return record;
+          });
+
+          // 3. Separar registros con ID (para UPDATE/UPSERT) y verdaderamente nuevos (para INSERT)
           const withId = fallasBatch.filter(f => f.id);
           const withoutId = fallasBatch.filter(f => !f.id);
 
           let allSavedData = [];
 
-          // 1. Actualizar registros existentes que ya tienen ID
+          // Actualizar existentes en Supabase
           if (withId.length > 0) {
             const { data: updatedData, error: errUpdate } = await supabase
               .from('fallas')
@@ -858,24 +930,17 @@ export default function Page() {
             if (updatedData) allSavedData = allSavedData.concat(updatedData);
           }
 
-          // 2. Insertar o actualizar los registros nuevos (sin ID previo)
+          // Insertar verdaderamente nuevos en Supabase
           if (withoutId.length > 0) {
-            let { data: insertedData, error: errInsert } = await supabase
+            const { data: insertedData, error: errInsert } = await supabase
               .from('fallas')
-              .upsert(withoutId, { onConflict: 'ticket' })
+              .insert(withoutId)
               .select();
-
-            if (errInsert) {
-              console.warn('Upsert por ticket tuvo advertencia, intentando insert directo:', errInsert.message);
-              const resInsert = await supabase.from('fallas').insert(withoutId).select();
-              if (resInsert.error) throw resInsert.error;
-              insertedData = resInsert.data;
-            }
-
+            if (errInsert) throw errInsert;
             if (insertedData) allSavedData = allSavedData.concat(insertedData);
           }
 
-          // 3. Mapear los IDs asignados por Supabase de vuelta a numberedPointsList
+          // 4. Mapear los IDs asignados por Supabase de vuelta a numberedPointsList
           if (allSavedData.length > 0) {
             const idMap = new Map(allSavedData.map(d => [String(d.ticket).trim().toLowerCase(), d.id]));
             setNumberedPointsList(prev => prev.map(p => {
