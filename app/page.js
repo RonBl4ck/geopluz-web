@@ -11,6 +11,7 @@ import TicketConflictModal from '@/components/TicketConflictModal';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import { exportExcelBySed } from '@/lib/excelUtils';
 import { getCachedSeds, setCachedSeds } from '@/lib/dbCache';
+import { isSedMatch, isLlaveMatch } from '@/lib/sedUtils';
 
 // MapViewer importado dinámicamente para evitar SSR
 const MapViewer = dynamic(() => import('@/components/MapViewer'), { ssr: false });
@@ -63,9 +64,9 @@ export default function Page() {
 
     if (!isSupabaseConfigured || !supabase) return;
     try {
-      const { data: sedsData, error: sedsError } = await supabase.from('seds').select('*');
-      const { data: llavesData } = await supabase.from('llaves').select('*');
-      const { data: fallasData } = await supabase.from('fallas').select('*');
+      const { data: sedsData, error: sedsError } = await supabase.from('seds').select('*').range(0, 99999);
+      const { data: llavesData } = await supabase.from('llaves').select('*').range(0, 99999);
+      const { data: fallasData } = await supabase.from('fallas').select('*').range(0, 99999);
       
       if (!sedsError && sedsData) {
         const db = {};
@@ -142,17 +143,16 @@ export default function Page() {
     }
   }
 
-  // Filtrado de Puntos
+  // Filtrado flexible de Puntos por SED y Llave
   const getFilteredPoints = useCallback(() => {
     return numberedPointsList
       .map((pt, i) => ({ ...pt, originalIndex: i }))
       .filter(pt => {
         if (!currentSedId) return true;
-        const ptSed = pt.sed || (pt.sedLlave ? pt.sedLlave.split('-')[0] : '');
-        return ptSed === currentSedId || (pt.sedLlave && pt.sedLlave.includes(currentSedId));
+        return isSedMatch(pt.sed, pt.sedLlave, currentSedId) && isLlaveMatch(pt.llaveSistema, pt.sedLlave, currentLlaveId);
       })
       .map((pt, i) => ({ ...pt, localNumber: i + 1 }));
-  }, [numberedPointsList, currentSedId]);
+  }, [numberedPointsList, currentSedId, currentLlaveId]);
 
   const filteredPoints = getFilteredPoints();
 
@@ -568,9 +568,9 @@ export default function Page() {
     link.click();
   }
 
-  function handleExportExcel() {
-    const dataToExport = numberedPointsList.length > 0 ? numberedPointsList : filteredPoints;
-    exportExcelBySed(dataToExport, currentSedId);
+  async function handleExportExcel() {
+    const dataToExport = filteredPoints.length > 0 ? filteredPoints : numberedPointsList;
+    await exportExcelBySed(dataToExport, currentSedId, currentLlaveId);
   }
 
   // Permisos de edición
@@ -1079,9 +1079,11 @@ export default function Page() {
           <PresentationHUD
             sedId={currentSedId}
             sedName={localDatabase[currentSedId]?.name || currentSedId || 'Sin SED'}
-            llaveName={currentLlaveId || 'Sin Llave'}
+            llaveName={currentLlaveId || ''}
             sedsList={sedsList}
+            localDatabase={localDatabase}
             onSelectSed={handleSedSelect}
+            onSelectLlave={(llaveId) => setCurrentLlaveId(llaveId)}
             currentMapStyle={currentMapStyle}
             onPrevSed={() => navigateSed(-1)}
             onNextSed={() => navigateSed(1)}

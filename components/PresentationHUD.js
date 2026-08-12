@@ -1,12 +1,15 @@
 'use client';
 import { useState, useRef, useEffect } from 'react';
+import { filterSedsList } from '@/lib/sedUtils';
 
 export default function PresentationHUD({
   sedId,
   sedName,
   llaveName,
   sedsList = [],
+  localDatabase = {},
   onSelectSed,
+  onSelectLlave,
   currentMapStyle,
   onPrevSed,
   onNextSed,
@@ -32,10 +35,13 @@ export default function PresentationHUD({
     cleanLlave = parts[parts.length - 1];
   }
 
-  // Filtrar SEDs según texto escrito
-  const filtered = searchText.trim()
-    ? sedsList.filter(s => s.toLowerCase().includes(searchText.toLowerCase()))
-    : sedsList;
+  // Lista de Llaves disponibles para la SED actual
+  const availableLlaves = sedId && localDatabase[sedId]?.llaves
+    ? Object.keys(localDatabase[sedId].llaves)
+    : [];
+
+  // Filtrar SEDs con lógica flexible (soporta con/sin "SED", ceros a la izquierda, y nombres)
+  const filtered = filterSedsList(sedsList, localDatabase, searchText);
 
   // Cerrar sugerencias si se hace clic fuera
   useEffect(() => {
@@ -63,10 +69,35 @@ export default function PresentationHUD({
 
       <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
         <div className="hud-title">
-          <span>SED {cleanSed}</span> | <span>Llave {cleanLlave}</span>
+          <span>SED {cleanSed}</span> | {availableLlaves.length > 1 ? (
+            <select
+              value={llaveName || ''}
+              onChange={(e) => onSelectLlave && onSelectLlave(e.target.value)}
+              style={{
+                background: 'transparent',
+                border: '1px solid var(--accent-cyan)',
+                borderRadius: '4px',
+                color: 'var(--accent-cyan)',
+                fontWeight: 'bold',
+                fontSize: '11px',
+                padding: '1px 4px',
+                cursor: 'pointer',
+                outline: 'none'
+              }}
+            >
+              <option value="" style={{ background: 'var(--bg-secondary)', color: 'var(--text-main)' }}>Todas las Llaves</option>
+              {availableLlaves.map(ll => (
+                <option key={ll} value={ll} style={{ background: 'var(--bg-secondary)', color: 'var(--text-main)' }}>
+                  Llave {ll}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <span>Llave {cleanLlave}</span>
+          )}
         </div>
 
-        {/* Buscador de SED con texto */}
+        {/* Buscador de SED con texto flexible */}
         {sedsList.length > 0 && (
           <div ref={containerRef} style={{ position: 'relative' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'var(--bg-secondary)', border: '1px solid var(--accent-cyan)', borderRadius: '6px', padding: '2px 6px' }}>
@@ -104,8 +135,8 @@ export default function PresentationHUD({
                 position: 'absolute',
                 top: 'calc(100% + 4px)',
                 left: 0,
-                minWidth: '180px',
-                maxHeight: '220px',
+                minWidth: '220px',
+                maxHeight: '250px',
                 overflowY: 'auto',
                 background: 'var(--bg-secondary)',
                 border: '1px solid var(--accent-cyan)',
@@ -113,25 +144,31 @@ export default function PresentationHUD({
                 zIndex: 9999,
                 boxShadow: '0 8px 24px rgba(0,0,0,0.4)'
               }}>
-                {filtered.map(s => (
-                  <div
-                    key={s}
-                    onMouseDown={() => handleSelect(s)}
-                    style={{
-                      padding: '6px 10px',
-                      fontSize: '11px',
-                      fontWeight: s === sedId ? '700' : '500',
-                      color: s === sedId ? 'var(--accent-cyan)' : 'var(--text-main)',
-                      cursor: 'pointer',
-                      background: s === sedId ? 'rgba(0,212,255,0.08)' : 'transparent',
-                      borderBottom: '1px solid rgba(255,255,255,0.04)'
-                    }}
-                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,212,255,0.12)'}
-                    onMouseLeave={e => e.currentTarget.style.background = s === sedId ? 'rgba(0,212,255,0.08)' : 'transparent'}
-                  >
-                    ⚡ {s}
-                  </div>
-                ))}
+                {filtered.map(s => {
+                  const sedNameObj = localDatabase[s]?.name;
+                  const labelName = sedNameObj && sedNameObj !== s && !sedNameObj.includes(s)
+                    ? `${s} (${sedNameObj})`
+                    : s;
+                  return (
+                    <div
+                      key={s}
+                      onMouseDown={() => handleSelect(s)}
+                      style={{
+                        padding: '6px 10px',
+                        fontSize: '11px',
+                        fontWeight: s === sedId ? '700' : '500',
+                        color: s === sedId ? 'var(--accent-cyan)' : 'var(--text-main)',
+                        cursor: 'pointer',
+                        background: s === sedId ? 'rgba(0,212,255,0.08)' : 'transparent',
+                        borderBottom: '1px solid rgba(255,255,255,0.04)'
+                      }}
+                      onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,212,255,0.12)'}
+                      onMouseLeave={e => e.currentTarget.style.background = s === sedId ? 'rgba(0,212,255,0.08)' : 'transparent'}
+                    >
+                      ⚡ {labelName}
+                    </div>
+                  );
+                })}
               </div>
             )}
 
@@ -180,3 +217,4 @@ export default function PresentationHUD({
     </div>
   );
 }
+

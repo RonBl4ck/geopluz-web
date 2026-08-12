@@ -7,6 +7,7 @@ import PresentationTablePanel from '@/components/PresentationTablePanel';
 import { supabase } from '@/lib/supabase';
 import { exportExcelBySed } from '@/lib/excelUtils';
 import { getCachedSeds, setCachedSeds } from '@/lib/dbCache';
+import { isSedMatch, isLlaveMatch } from '@/lib/sedUtils';
 
 // MapViewer importado dinámicamente para evitar SSR
 const MapViewer = dynamic(() => import('@/components/MapViewer'), { ssr: false });
@@ -41,9 +42,9 @@ export default function PresentacionPage() {
     }
 
     try {
-      const { data: sedsData, error: sedsError } = await supabase.from('seds').select('*');
-      const { data: llavesData } = await supabase.from('llaves').select('*');
-      const { data: fallasData } = await supabase.from('fallas').select('*');
+      const { data: sedsData, error: sedsError } = await supabase.from('seds').select('*').range(0, 99999);
+      const { data: llavesData } = await supabase.from('llaves').select('*').range(0, 99999);
+      const { data: fallasData } = await supabase.from('fallas').select('*').range(0, 99999);
       
       if (!sedsError && sedsData) {
         const db = {};
@@ -107,17 +108,17 @@ export default function PresentacionPage() {
     }
   }
 
-  // Filtrado de Puntos
+  // Filtrado flexible de Puntos de Falla por SED y Llave
   const getFilteredPoints = useCallback(() => {
     let list = numberedPointsList;
     if (currentSedId) {
-      list = list.filter(pt => {
-        const ptSed = pt.sed || (pt.sedLlave ? pt.sedLlave.split('-')[0] : '');
-        return ptSed === currentSedId || (pt.sedLlave && pt.sedLlave.includes(currentSedId));
-      });
+      list = list.filter(pt => 
+        isSedMatch(pt.sed, pt.sedLlave, currentSedId) && 
+        isLlaveMatch(pt.llaveSistema, pt.sedLlave, currentLlaveId)
+      );
     }
     return list.map((pt, i) => ({ ...pt, localNumber: i + 1 }));
-  }, [numberedPointsList, currentSedId]);
+  }, [numberedPointsList, currentSedId, currentLlaveId]);
 
   const filteredPoints = getFilteredPoints();
 
@@ -127,9 +128,9 @@ export default function PresentacionPage() {
     }
   }
 
-  function handleExportExcel() {
-    const dataToExport = numberedPointsList.length > 0 ? numberedPointsList : filteredPoints;
-    exportExcelBySed(dataToExport, currentSedId);
+  async function handleExportExcel() {
+    const dataToExport = filteredPoints.length > 0 ? filteredPoints : numberedPointsList;
+    await exportExcelBySed(dataToExport, currentSedId, currentLlaveId);
   }
 
   // Navegación
@@ -187,14 +188,16 @@ export default function PresentacionPage() {
       <PresentationHUD
         sedId={currentSedId}
         sedName={localDatabase[currentSedId]?.name || currentSedId || 'Sin SED'}
-        llaveName={currentLlaveId || 'Sin Llave'}
+        llaveName={currentLlaveId || ''}
         sedsList={sedsList}
+        localDatabase={localDatabase}
         onSelectSed={(sedId) => {
           setCurrentSedId(sedId);
           const llaves = Object.keys(localDatabase[sedId]?.llaves || {});
           if (llaves.length > 0) setCurrentLlaveId(llaves[0]);
           else setCurrentLlaveId('');
         }}
+        onSelectLlave={(llaveId) => setCurrentLlaveId(llaveId)}
         currentMapStyle={currentMapStyle}
         onPrevSed={() => navigateSed(-1)}
         onNextSed={() => navigateSed(1)}
@@ -210,3 +213,4 @@ export default function PresentacionPage() {
     </>
   );
 }
+
