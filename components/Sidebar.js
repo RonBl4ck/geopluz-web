@@ -19,6 +19,15 @@ export default function Sidebar({
   setIsAddPointMode,
   isPresentationMode,
   isEditable,
+  circuitNote,
+  cableGroups,
+  isSegmentSelectionMode,
+  selectedLineCount,
+  selectedDistance,
+  onSaveCircuitNote,
+  onToggleSegmentSelection,
+  onSaveCableGroup,
+  onDeleteCableGroup,
   onTogglePresentationMode,
   onImportJson,
   onImportJsonText,
@@ -37,6 +46,12 @@ export default function Sidebar({
   const [showJsonPasteModal, setShowJsonPasteModal] = useState(false);
   const [pastedJsonText, setPastedJsonText] = useState('');
   const [sedsMasterDB, setSedsMasterDB] = useState({});
+  const [noteDraft, setNoteDraft] = useState('');
+  const [cableName, setCableName] = useState('');
+  const [cableCalibre, setCableCalibre] = useState('');
+  const [cableColor, setCableColor] = useState('#ef6c00');
+
+  useEffect(() => setNoteDraft(circuitNote || ''), [circuitNote, currentSedId, currentLlaveId]);
 
   useEffect(() => {
     fetch('/seds_master_db.min.json')
@@ -322,6 +337,33 @@ export default function Sidebar({
               </div>
             </div>
           )}
+        </div>
+
+        {/* Tarjeta 4: Análisis técnico del circuito */}
+        <div className="card">
+          <div className="card-title"><i className="fa-solid fa-pen-to-square"></i> 4. Análisis del Circuito</div>
+          <div className="form-group">
+            <label>Nota visible en el mapa (SED + llave seleccionadas):</label>
+            <textarea className="input-control" rows="3" value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} disabled={!currentLlaveId} placeholder="Conclusión o recomendación del análisis..." />
+            <button className="btn btn-cyan" style={{ marginTop: '6px' }} disabled={!currentLlaveId} onClick={() => onSaveCircuitNote(noteDraft.trim())}>
+              <i className="fa-solid fa-floppy-disk"></i> Guardar nota del circuito
+            </button>
+          </div>
+          <div className="form-group" style={{ borderTop: '1px solid var(--border-color)', paddingTop: '10px' }}>
+            <label>Clasificación de cable por tramos:</label>
+            <button className={`btn ${isSegmentSelectionMode ? 'btn-active-mode' : 'btn-orange'}`} disabled={!currentLlaveId} onClick={onToggleSegmentSelection}>
+              <i className="fa-solid fa-object-group"></i> {isSegmentSelectionMode ? 'Finalizar selección' : 'Seleccionar tramos en el mapa'}
+            </button>
+            {isSegmentSelectionMode && <div style={{ marginTop: '7px', fontSize: '11px', color: 'var(--accent-cyan)' }}>
+              Seleccionados: <b>{selectedLineCount}</b> · Distancia: <b>{selectedDistance.toFixed(0)} m</b>
+            </div>}
+            {selectedLineCount > 0 && <div style={{ display: 'grid', gap: '6px', marginTop: '8px' }}>
+              <input className="input-control" value={cableCalibre} onChange={(e) => setCableCalibre(e.target.value)} placeholder="Calibre (ej. 70 mm²)" />
+              <input className="input-control" value={cableName} onChange={(e) => setCableName(e.target.value)} placeholder="Nombre opcional del grupo" />
+              <div style={{ display: 'flex', gap: '6px' }}><input type="color" value={cableColor} onChange={(e) => setCableColor(e.target.value)} /><button className="btn btn-green" style={{ flex: 1 }} disabled={!cableCalibre.trim()} onClick={() => { onSaveCableGroup({ name: cableName.trim(), calibre: cableCalibre.trim(), color: cableColor }); setCableName(''); setCableCalibre(''); }}>Guardar calibre</button></div>
+            </div>}
+            {(cableGroups || []).map(group => <div key={group.id} style={{ display: 'flex', gap: '6px', alignItems: 'center', marginTop: '7px', fontSize: '10.5px' }}><span style={{ width: 12, height: 12, borderRadius: 2, background: group.color }}></span><span style={{ flex: 1 }}><b>{group.calibre}</b>{group.name ? ` · ${group.name}` : ''} · {Number(group.distance || 0).toFixed(0)} m</span><button className="btn btn-outline" style={{ width: 'auto', padding: '3px 6px', color: '#ff1744' }} onClick={() => onDeleteCableGroup(group.id)} title="Eliminar clasificación"><i className="fa-solid fa-trash"></i></button></div>)}
+          </div>
         </div>
 
         {/* Tarjeta 4: Registro de Fallas Reparadas */}

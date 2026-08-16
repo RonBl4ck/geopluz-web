@@ -15,9 +15,14 @@ const MapViewer = forwardRef(({
   isAddPointMode,
   isRelocating,
   isPresentationMode,
+  circuitNote,
+  cableGroups = [],
+  isSegmentSelectionMode,
+  selectedLineIds = [],
   onMapClick,
   onSedDragEnd,
-  onPointClick
+  onPointClick,
+  onLineClick
 }, ref) => {
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
@@ -163,15 +168,25 @@ const MapViewer = forwardRef(({
       const zoom = mapInstanceRef.current.getZoom();
       const weight = getWeightForZoom(zoom);
 
-      llaveData.lines.forEach(line => {
+      llaveData.lines.forEach((line, index) => {
         if (line.coords && line.coords.length > 0) {
           const fixedCoords = line.coords.map(c => fixCoord(c));
+          const lineId = String(line.id ?? index);
+          const cableGroup = cableGroups.find(group => group.lineIds?.map(String).includes(lineId));
+          const isSelected = selectedLineIds.includes(lineId);
 
           const polyline = L.polyline(fixedCoords, {
-            color: lineColor,
-            weight: weight,
+            color: isSelected ? '#ffca28' : (cableGroup?.color || lineColor),
+            weight: isSelected ? weight + 3 : (cableGroup ? weight + 1.5 : weight),
             opacity: 0.9
           }).addTo(networkGroup);
+
+          if (isSegmentSelectionMode) {
+            polyline.on('click', (event) => {
+              L.DomEvent.stopPropagation(event);
+              onLineClick?.(line.id ?? index);
+            });
+          }
 
           if (line.id || line.length) {
             polyline.bindTooltip(`
@@ -254,7 +269,7 @@ const MapViewer = forwardRef(({
     if (bounds.length > 0 && mapInstanceRef.current) {
       mapInstanceRef.current.fitBounds(bounds, { padding: [50, 50], maxZoom: 18, animate: true });
     }
-  }, [llaveData, sedCoord, sedId, currentTheme, sedsMasterDB]);
+  }, [llaveData, sedCoord, sedId, currentTheme, sedsMasterDB, cableGroups, isSegmentSelectionMode, selectedLineIds, onLineClick]);
 
   // Dibujar puntos de falla
   useEffect(() => {
@@ -382,6 +397,20 @@ const MapViewer = forwardRef(({
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
       <div id="map" ref={mapRef} style={{ width: '100%', height: '100%' }}></div>
+
+      {circuitNote && (
+        <div style={{ position: 'absolute', top: '14px', left: '14px', zIndex: 1000, maxWidth: '320px', padding: '10px 12px', borderRadius: '8px', background: currentTheme === 'dark' ? 'rgba(18,25,44,.94)' : 'rgba(255,255,255,.96)', color: currentTheme === 'dark' ? '#e0f7fa' : '#1a202c', border: `1px solid ${currentTheme === 'dark' ? 'rgba(0,229,255,.35)' : '#9fb3c8'}`, boxShadow: '0 3px 12px rgba(0,0,0,.22)', fontSize: '11px', lineHeight: 1.45 }}>
+          <div style={{ fontWeight: 700, marginBottom: '4px', color: 'var(--accent-cyan)' }}><i className="fa-solid fa-clipboard-list"></i> Análisis del circuito</div>
+          {circuitNote}
+        </div>
+      )}
+
+      {isSegmentSelectionMode && <div style={{ position: 'absolute', top: circuitNote ? '120px' : '14px', left: '14px', zIndex: 1000, padding: '8px 10px', borderRadius: '6px', background: '#fff8e1', border: '1px solid #ffca28', color: '#6d4c00', fontSize: '11px', fontWeight: 600 }}>Haz clic en los tramos para seleccionarlos.</div>}
+
+      {cableGroups.length > 0 && <div style={{ position: 'absolute', top: circuitNote ? '120px' : '14px', right: '14px', zIndex: 1000, maxWidth: '265px', padding: '9px 11px', borderRadius: '8px', background: currentTheme === 'dark' ? 'rgba(18,25,44,.94)' : 'rgba(255,255,255,.96)', color: currentTheme === 'dark' ? '#e0f7fa' : '#1a202c', border: `1px solid ${currentTheme === 'dark' ? 'rgba(0,229,255,.3)' : '#cbd5e0'}`, boxShadow: '0 3px 12px rgba(0,0,0,.2)', fontSize: '10.5px' }}>
+        <div style={{ fontWeight: 700, marginBottom: '6px' }}><i className="fa-solid fa-cable-car"></i> Calibres del circuito</div>
+        {cableGroups.map(group => <div key={group.id} style={{ display: 'flex', gap: '7px', alignItems: 'center', marginTop: '4px' }}><span style={{ width: 14, height: 4, background: group.color, borderRadius: 2 }}></span><span><b>{group.calibre}</b>{group.name ? ` · ${group.name}` : ''} ({Number(group.distance || 0).toFixed(0)} m)</span></div>)}
+      </div>}
 
       {/* Leyenda de Causas de Falla */}
       <div className="map-legend-container" style={{

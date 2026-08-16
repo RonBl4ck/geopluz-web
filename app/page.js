@@ -12,6 +12,7 @@ import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import { exportExcelBySed } from '@/lib/excelUtils';
 import { getCachedSeds, setCachedSeds } from '@/lib/dbCache';
 import { isSedMatch, isLlaveMatch } from '@/lib/sedUtils';
+import { hydrateLlave, serializeLlaveLines } from '@/lib/circuitAnalysis';
 
 // MapViewer importado dinámicamente para evitar SSR
 const MapViewer = dynamic(() => import('@/components/MapViewer'), { ssr: false });
@@ -36,6 +37,8 @@ export default function Page() {
   const [isAddPointMode, setIsAddPointMode] = useState(false);
   const [isPresentationMode, setIsPresentationMode] = useState(true);
   const [relocatingPointIndex, setRelocatingPointIndex] = useState(null);
+  const [isSegmentSelectionMode, setIsSegmentSelectionMode] = useState(false);
+  const [selectedLineIds, setSelectedLineIds] = useState([]);
 
   // Estado del Formulario
   const [isFormOpen, setIsFormOpen] = useState(false);
@@ -82,10 +85,7 @@ export default function Page() {
         if (llavesData) {
           llavesData.forEach(llave => {
             if (db[llave.sed_id]) {
-              db[llave.sed_id].llaves[llave.llave_code] = {
-                name: llave.name,
-                lines: llave.lines_data || []
-              };
+              db[llave.sed_id].llaves[llave.llave_code] = hydrateLlave(llave);
             }
           });
         }
@@ -292,7 +292,8 @@ export default function Page() {
             const existingLlaves = { ...(updated[sedId].llaves || {}) };
             const newLlaves = incoming[sedId].llaves || {};
             for (const llaveId in newLlaves) {
-              existingLlaves[llaveId] = newLlaves[llaveId];
+              const existingAnalysis = existingLlaves[llaveId]?.analysis;
+              existingLlaves[llaveId] = { ...newLlaves[llaveId], ...(existingAnalysis ? { analysis: existingAnalysis } : {}) };
             }
             updated[sedId] = { ...updated[sedId], llaves: existingLlaves };
           }
@@ -808,7 +809,7 @@ export default function Page() {
               sed_id: sedId,
               llave_code: llaveCode,
               name: llave.name || llaveCode,
-              lines_data: llave.lines || []
+              lines_data: serializeLlaveLines(llave)
             });
           }
         }
@@ -1015,6 +1016,48 @@ export default function Page() {
 
   const currentSedCoord = localDatabase[currentSedId]?.sedCoord || null;
 
+  const currentAnalysis = currentLlaveData?.analysis || { note: '', cableGroups: [] };
+  const selectedDistance = (currentLlaveData?.lines || [])
+    .filter((line, index) => selectedLineIds.includes(String(line.id ?? index)))
+    .reduce((total, line) => total + (Number(line.length) || 0), 0);
+
+  function updateCurrentLlaveAnalysis(updater) {
+    if (!currentSedId || !currentLlaveId) return;
+    setLocalDatabase(prev => {
+      const llave = prev[currentSedId]?.llaves?.[currentLlaveId];
+      if (!llave) return prev;
+      const updatedLlave = { ...llave, analysis: updater(llave.analysis || { note: '', cableGroups: [] }) };
+      const updated = { ...prev, [currentSedId]: { ...prev[currentSedId], llaves: { ...prev[currentSedId].llaves, [currentLlaveId]: updatedLlave } } };
+      setCachedSeds(updated);
+      saveSedsToSupabase({ [currentSedId]: updated[currentSedId] });
+      return updated;
+    });
+  }
+
+  function handleSaveCircuitNote(note) {
+    updateCurrentLlaveAnalysis(analysis => ({ ...analysis, note }));
+  }
+
+  function handleLineClick(lineId) {
+    if (!isSegmentSelectionMode) return;
+    setSelectedLineIds(prev => prev.includes(String(lineId)) ? prev.filter(id => id !== String(lineId)) : [...prev, String(lineId)]);
+  }
+
+  function handleSaveCableGroup({ name, calibre, color }) {
+    if (!selectedLineIds.length) return;
+    const group = { id: `cable-${Date.now()}`, name: name || 'Tramo sin nombre', calibre, color, lineIds: selectedLineIds, distance: selectedDistance };
+    updateCurrentLlaveAnalysis(analysis => ({
+      ...analysis,
+      cableGroups: [...(analysis.cableGroups || []).filter(item => !item.lineIds?.some(id => selectedLineIds.includes(String(id)))), group]
+    }));
+    setSelectedLineIds([]);
+    setIsSegmentSelectionMode(false);
+  }
+
+  function handleDeleteCableGroup(groupId) {
+    updateCurrentLlaveAnalysis(analysis => ({ ...analysis, cableGroups: (analysis.cableGroups || []).filter(group => group.id !== groupId) }));
+  }
+
   async function handleEnterEditMode() {
     const allowed = await checkEditPermission();
     if (allowed) {
@@ -1041,6 +1084,15 @@ export default function Page() {
           setIsAddPointMode={setIsAddPointMode}
           isPresentationMode={isPresentationMode}
           isEditable={isEditable}
+          circuitNote={currentAnalysis.note}
+          cableGroups={currentAnalysis.cableGroups || []}
+          isSegmentSelectionMode={isSegmentSelectionMode}
+          selectedLineCount={selectedLineIds.length}
+          selectedDistance={selectedDistance}
+          onSaveCircuitNote={handleSaveCircuitNote}
+          onToggleSegmentSelection={() => { setIsSegmentSelectionMode(value => !value); setSelectedLineIds([]); }}
+          onSaveCableGroup={handleSaveCableGroup}
+          onDeleteCableGroup={handleDeleteCableGroup}
           onTogglePresentationMode={() => setIsPresentationMode(true)}
           onImportJson={handleImportJson}
           onImportJsonText={handleImportJsonText}
@@ -1068,6 +1120,11 @@ export default function Page() {
           isAddPointMode={isAddPointMode}
           isRelocating={relocatingPointIndex !== null}
           isPresentationMode={isPresentationMode}
+          circuitNote={currentAnalysis.note}
+          cableGroups={currentAnalysis.cableGroups || []}
+          isSegmentSelectionMode={isSegmentSelectionMode}
+          selectedLineIds={selectedLineIds}
+          onLineClick={handleLineClick}
           onMapClick={handleMapClick}
           onSedDragEnd={handleSedDragEnd}
           onPointClick={(idx) => { setEditingPointIndex(idx); setIsFormOpen(true); }}

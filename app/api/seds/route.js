@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
+import { hydrateLlave, serializeLlaveLines } from '@/lib/circuitAnalysis';
 
 export async function GET() {
   try {
@@ -21,10 +22,7 @@ export async function GET() {
     
     llavesData.forEach(llave => {
       if (db[llave.sed_id]) {
-        db[llave.sed_id].llaves[llave.llave_code] = {
-          name: llave.name,
-          lines: llave.lines_data || []
-        };
+        db[llave.sed_id].llaves[llave.llave_code] = hydrateLlave(llave);
       }
     });
     
@@ -55,7 +53,7 @@ export async function POST(request) {
             sed_id: sedId,
             llave_code: llaveCode,
             name: llave.name || llaveCode,
-            lines_data: llave.lines || []
+            lines_data: serializeLlaveLines(llave)
           });
         }
       }

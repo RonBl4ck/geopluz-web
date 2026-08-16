@@ -8,6 +8,7 @@ import { supabase } from '@/lib/supabase';
 import { exportExcelBySed } from '@/lib/excelUtils';
 import { getCachedSeds, setCachedSeds } from '@/lib/dbCache';
 import { isSedMatch, isLlaveMatch } from '@/lib/sedUtils';
+import { hydrateLlave } from '@/lib/circuitAnalysis';
 
 // MapViewer importado dinámicamente para evitar SSR
 const MapViewer = dynamic(() => import('@/components/MapViewer'), { ssr: false });
@@ -60,10 +61,7 @@ export default function PresentacionPage() {
         if (llavesData) {
           llavesData.forEach(llave => {
             if (db[llave.sed_id]) {
-              db[llave.sed_id].llaves[llave.llave_code] = {
-                name: llave.name,
-                lines: llave.lines_data || []
-              };
+              db[llave.sed_id].llaves[llave.llave_code] = hydrateLlave(llave);
             }
           });
         }
@@ -179,6 +177,10 @@ export default function PresentacionPage() {
           faultPoints={filteredPoints}
           isAddPointMode={false}
           isPresentationMode={true}
+          circuitNote={currentLlaveData?.analysis?.note || ''}
+          cableGroups={currentLlaveData?.analysis?.cableGroups || []}
+          isSegmentSelectionMode={false}
+          selectedLineIds={[]}
           onMapClick={() => {}}
           onSedDragEnd={() => {}}
           onPointClick={(idx) => handleFlyToPoint(filteredPoints.find(p => p.localNumber - 1 === idx))}
@@ -213,4 +215,3 @@ export default function PresentacionPage() {
     </>
   );
 }
-
