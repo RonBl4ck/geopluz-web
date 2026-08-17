@@ -163,6 +163,9 @@ export default function PresentacionPage() {
     : null;
 
   const currentSedCoord = localDatabase[currentSedId]?.sedCoord || null;
+  const circuitEntries = Object.entries(localDatabase).flatMap(([sedId, sed]) => Object.entries(sed.llaves || {}).map(([llaveId, llave]) => ({
+    sedId, llaveId, sedName: sed.name || sedId, status: llave.analysis?.status || 'cargado'
+  })));
 
   return (
     <>
@@ -194,6 +197,8 @@ export default function PresentacionPage() {
         llaveName={currentLlaveId || ''}
         sedsList={sedsList}
         localDatabase={localDatabase}
+        circuitEntries={circuitEntries}
+        circuitStatus={currentLlaveData?.analysis?.status || 'cargado'}
         onSelectSed={(sedId) => {
           setCurrentSedId(sedId);
           const llaves = Object.keys(localDatabase[sedId]?.llaves || {});
@@ -201,6 +206,7 @@ export default function PresentacionPage() {
           else setCurrentLlaveId('');
         }}
         onSelectLlave={(llaveId) => setCurrentLlaveId(llaveId)}
+        onSelectCircuit={(sedId, llaveId) => { setCurrentSedId(sedId); setCurrentLlaveId(llaveId); }}
         currentMapStyle={currentMapStyle}
         onPrevSed={() => navigateSed(-1)}
         onNextSed={() => navigateSed(1)}

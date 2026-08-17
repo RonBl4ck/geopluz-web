@@ -2,6 +2,7 @@
 
 import { useRef, useState, useEffect } from 'react';
 import FaultTable from './FaultTable';
+import { CIRCUIT_STATUSES } from '@/lib/circuitAnalysis';
 
 export default function Sidebar({
   seds,
@@ -21,10 +22,12 @@ export default function Sidebar({
   isEditable,
   circuitNote,
   cableGroups,
+  circuitStatus,
   isSegmentSelectionMode,
   selectedLineCount,
   selectedDistance,
   onSaveCircuitNote,
+  onSaveCircuitStatus,
   onToggleSegmentSelection,
   onSaveCableGroup,
   onDeleteCableGroup,
@@ -50,8 +53,10 @@ export default function Sidebar({
   const [cableName, setCableName] = useState('');
   const [cableCalibre, setCableCalibre] = useState('');
   const [cableColor, setCableColor] = useState('#ef6c00');
+  const [statusDraft, setStatusDraft] = useState('cargado');
 
   useEffect(() => setNoteDraft(circuitNote || ''), [circuitNote, currentSedId, currentLlaveId]);
+  useEffect(() => setStatusDraft(circuitStatus || 'cargado'), [circuitStatus, currentSedId, currentLlaveId]);
 
   useEffect(() => {
     fetch('/seds_master_db.min.json')
@@ -342,6 +347,15 @@ export default function Sidebar({
         {/* Tarjeta 4: Análisis técnico del circuito */}
         <div className="card">
           <div className="card-title"><i className="fa-solid fa-pen-to-square"></i> 4. Análisis del Circuito</div>
+          <div className="form-group">
+            <label>Estado del circuito:</label>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <select className="input-control" value={statusDraft} disabled={!currentLlaveId} onChange={(e) => setStatusDraft(e.target.value)}>
+                {Object.entries(CIRCUIT_STATUSES).map(([value, item]) => <option key={value} value={value}>{item.label}</option>)}
+              </select>
+              <button className="btn btn-cyan" style={{ width: 'auto', whiteSpace: 'nowrap' }} disabled={!currentLlaveId} onClick={() => onSaveCircuitStatus(statusDraft)}>Guardar estado</button>
+            </div>
+          </div>
           <div className="form-group">
             <label>Nota visible en el mapa (SED + llave seleccionadas):</label>
             <textarea className="input-control" rows="3" value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} disabled={!currentLlaveId} placeholder="Conclusión o recomendación del análisis..." />

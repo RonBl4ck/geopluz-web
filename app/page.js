@@ -12,7 +12,7 @@ import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import { exportExcelBySed } from '@/lib/excelUtils';
 import { getCachedSeds, setCachedSeds } from '@/lib/dbCache';
 import { isSedMatch, isLlaveMatch } from '@/lib/sedUtils';
-import { hydrateLlave, serializeLlaveLines } from '@/lib/circuitAnalysis';
+import { CIRCUIT_STATUSES, hydrateLlave, serializeLlaveLines } from '@/lib/circuitAnalysis';
 
 // MapViewer importado dinámicamente para evitar SSR
 const MapViewer = dynamic(() => import('@/components/MapViewer'), { ssr: false });
@@ -1016,7 +1016,10 @@ export default function Page() {
 
   const currentSedCoord = localDatabase[currentSedId]?.sedCoord || null;
 
-  const currentAnalysis = currentLlaveData?.analysis || { note: '', cableGroups: [] };
+  const currentAnalysis = currentLlaveData?.analysis || { note: '', cableGroups: [], status: 'cargado' };
+  const circuitEntries = Object.entries(localDatabase).flatMap(([sedId, sed]) => Object.entries(sed.llaves || {}).map(([llaveId, llave]) => ({
+    sedId, llaveId, sedName: sed.name || sedId, status: llave.analysis?.status || 'cargado'
+  })));
   const selectedDistance = (currentLlaveData?.lines || [])
     .filter((line, index) => selectedLineIds.includes(String(line.id ?? index)))
     .reduce((total, line) => total + (Number(line.length) || 0), 0);
@@ -1036,6 +1039,11 @@ export default function Page() {
 
   function handleSaveCircuitNote(note) {
     updateCurrentLlaveAnalysis(analysis => ({ ...analysis, note }));
+  }
+
+  function handleSaveCircuitStatus(status) {
+    if (!CIRCUIT_STATUSES[status]) return;
+    updateCurrentLlaveAnalysis(analysis => ({ ...analysis, status }));
   }
 
   function handleLineClick(lineId) {
@@ -1086,10 +1094,12 @@ export default function Page() {
           isEditable={isEditable}
           circuitNote={currentAnalysis.note}
           cableGroups={currentAnalysis.cableGroups || []}
+          circuitStatus={currentAnalysis.status}
           isSegmentSelectionMode={isSegmentSelectionMode}
           selectedLineCount={selectedLineIds.length}
           selectedDistance={selectedDistance}
           onSaveCircuitNote={handleSaveCircuitNote}
+          onSaveCircuitStatus={handleSaveCircuitStatus}
           onToggleSegmentSelection={() => { setIsSegmentSelectionMode(value => !value); setSelectedLineIds([]); }}
           onSaveCableGroup={handleSaveCableGroup}
           onDeleteCableGroup={handleDeleteCableGroup}
@@ -1140,8 +1150,11 @@ export default function Page() {
             llaveName={currentLlaveId || ''}
             sedsList={sedsList}
             localDatabase={localDatabase}
+            circuitEntries={circuitEntries}
+            circuitStatus={currentAnalysis.status}
             onSelectSed={handleSedSelect}
             onSelectLlave={(llaveId) => setCurrentLlaveId(llaveId)}
+            onSelectCircuit={(sedId, llaveId) => { setCurrentSedId(sedId); setCurrentLlaveId(llaveId); }}
             currentMapStyle={currentMapStyle}
             onPrevSed={() => navigateSed(-1)}
             onNextSed={() => navigateSed(1)}
