@@ -1113,6 +1113,7 @@ export default function Page() {
           ref={mapRef}
           currentTheme={currentTheme}
           currentMapStyle={currentMapStyle}
+          circuitId={`${currentSedId}:${currentLlaveId}`}
           llaveData={currentLlaveData}
           sedId={currentSedId}
           sedCoord={currentSedCoord}

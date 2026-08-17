@@ -8,6 +8,7 @@ import { TILE_LAYERS, MAP_DEFAULT_CENTER, MAP_DEFAULT_ZOOM, MAP_MAX_ZOOM, FAULT_
 const MapViewer = forwardRef(({
   currentTheme,
   currentMapStyle,
+  circuitId,
   llaveData,
   sedId,
   sedCoord,
@@ -32,6 +33,7 @@ const MapViewer = forwardRef(({
   const networkLayerGroupRef = useRef(null);
   const pointsLayerGroupRef = useRef(null);
   const sedMarkerRef = useRef(null);
+  const fittedCircuitRef = useRef(null);
   const [sedsMasterDB, setSedsMasterDB] = useState({});
   const [mapViewport, setMapViewport] = useState({ bounds: null, zoom: MAP_DEFAULT_ZOOM });
   const [showLegend, setShowLegend] = useState(true);
@@ -266,8 +268,10 @@ const MapViewer = forwardRef(({
     }
 
     // Centrar y enfocar automáticamente el mapa a los límites de la Llave seleccionada
-    if (bounds.length > 0 && mapInstanceRef.current) {
+    // No reencuadrar cuando cambia solo el resaltado de una selección: conserva el zoom del usuario.
+    if (bounds.length > 0 && mapInstanceRef.current && fittedCircuitRef.current !== circuitId) {
       mapInstanceRef.current.fitBounds(bounds, { padding: [50, 50], maxZoom: 18, animate: true });
+      fittedCircuitRef.current = circuitId;
     }
   }, [llaveData, sedCoord, sedId, currentTheme, sedsMasterDB, cableGroups, isSegmentSelectionMode, selectedLineIds, onLineClick]);
 
