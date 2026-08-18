@@ -89,7 +89,8 @@ const MapViewer = forwardRef(({
       zoom: MAP_DEFAULT_ZOOM,
       zoomControl: false,
       maxZoom: MAP_MAX_ZOOM,
-      attributionControl: false
+      attributionControl: false,
+      preferCanvas: true
     });
 
     // Control de zoom
@@ -403,18 +404,66 @@ const MapViewer = forwardRef(({
       <div id="map" ref={mapRef} style={{ width: '100%', height: '100%' }}></div>
 
       {circuitNote && (
-        <div style={{ position: 'absolute', top: '14px', left: '14px', zIndex: 1000, maxWidth: '320px', padding: '10px 12px', borderRadius: '8px', background: currentTheme === 'dark' ? 'rgba(18,25,44,.94)' : 'rgba(255,255,255,.96)', color: currentTheme === 'dark' ? '#e0f7fa' : '#1a202c', border: `1px solid ${currentTheme === 'dark' ? 'rgba(0,229,255,.35)' : '#9fb3c8'}`, boxShadow: '0 3px 12px rgba(0,0,0,.22)', fontSize: '11px', lineHeight: 1.45 }}>
+        <div style={{
+          position: 'absolute',
+          top: isPresentationMode ? '78px' : '14px',
+          left: '14px',
+          zIndex: 1000,
+          maxWidth: '320px',
+          padding: '10px 12px',
+          borderRadius: '8px',
+          background: currentTheme === 'dark' ? 'rgba(18,25,44,.94)' : 'rgba(255,255,255,.96)',
+          color: currentTheme === 'dark' ? '#e0f7fa' : '#1a202c',
+          border: `1px solid ${currentTheme === 'dark' ? 'rgba(0,229,255,.35)' : '#9fb3c8'}`,
+          boxShadow: '0 3px 12px rgba(0,0,0,.22)',
+          fontSize: '11px',
+          lineHeight: 1.45,
+          transition: 'top 0.3s ease'
+        }}>
           <div style={{ fontWeight: 700, marginBottom: '4px', color: 'var(--accent-cyan)' }}><i className="fa-solid fa-clipboard-list"></i> Análisis del circuito</div>
           {circuitNote}
         </div>
       )}
 
-      {isSegmentSelectionMode && <div style={{ position: 'absolute', top: circuitNote ? '120px' : '14px', left: '14px', zIndex: 1000, padding: '8px 10px', borderRadius: '6px', background: '#fff8e1', border: '1px solid #ffca28', color: '#6d4c00', fontSize: '11px', fontWeight: 600 }}>Haz clic en los tramos para seleccionarlos.</div>}
+      {isSegmentSelectionMode && (
+        <div style={{
+          position: 'absolute',
+          top: isPresentationMode ? (circuitNote ? '180px' : '78px') : (circuitNote ? '120px' : '14px'),
+          left: '14px',
+          zIndex: 1000,
+          padding: '8px 10px',
+          borderRadius: '6px',
+          background: '#fff8e1',
+          border: '1px solid #ffca28',
+          color: '#6d4c00',
+          fontSize: '11px',
+          fontWeight: 600,
+          transition: 'top 0.3s ease'
+        }}>
+          Haz clic en los tramos para seleccionarlos.
+        </div>
+      )}
 
-      {cableGroups.length > 0 && <div style={{ position: 'absolute', top: circuitNote ? '120px' : '14px', right: '14px', zIndex: 1000, maxWidth: '265px', padding: '9px 11px', borderRadius: '8px', background: currentTheme === 'dark' ? 'rgba(18,25,44,.94)' : 'rgba(255,255,255,.96)', color: currentTheme === 'dark' ? '#e0f7fa' : '#1a202c', border: `1px solid ${currentTheme === 'dark' ? 'rgba(0,229,255,.3)' : '#cbd5e0'}`, boxShadow: '0 3px 12px rgba(0,0,0,.2)', fontSize: '10.5px' }}>
-        <div style={{ fontWeight: 700, marginBottom: '6px' }}><i className="fa-solid fa-cable-car"></i> Calibres del circuito</div>
-        {cableGroups.map(group => <div key={group.id} style={{ display: 'flex', gap: '7px', alignItems: 'center', marginTop: '4px' }}><span style={{ width: 14, height: 4, background: group.color, borderRadius: 2 }}></span><span><b>{group.calibre}</b>{group.name ? ` · ${group.name}` : ''} ({Number(group.distance || 0).toFixed(0)} m)</span></div>)}
-      </div>}
+      {cableGroups.length > 0 && (
+        <div style={{
+          position: 'absolute',
+          top: isPresentationMode ? '78px' : (circuitNote ? '120px' : '14px'),
+          right: '14px',
+          zIndex: 1000,
+          maxWidth: '265px',
+          padding: '9px 11px',
+          borderRadius: '8px',
+          background: currentTheme === 'dark' ? 'rgba(18,25,44,.94)' : 'rgba(255,255,255,.96)',
+          color: currentTheme === 'dark' ? '#e0f7fa' : '#1a202c',
+          border: `1px solid ${currentTheme === 'dark' ? 'rgba(0,229,255,.3)' : '#cbd5e0'}`,
+          boxShadow: '0 3px 12px rgba(0,0,0,.2)',
+          fontSize: '10.5px',
+          transition: 'top 0.3s ease'
+        }}>
+          <div style={{ fontWeight: 700, marginBottom: '6px' }}><i className="fa-solid fa-cable-car"></i> Calibres del circuito</div>
+          {cableGroups.map(group => <div key={group.id} style={{ display: 'flex', gap: '7px', alignItems: 'center', marginTop: '4px' }}><span style={{ width: 14, height: 4, background: group.color, borderRadius: 2 }}></span><span><b>{group.calibre}</b>{group.name ? ` · ${group.name}` : ''} ({Number(group.distance || 0).toFixed(0)} m)</span></div>)}
+        </div>
+      )}
 
       {/* Leyenda de Causas de Falla */}
       <div className="map-legend-container" style={{

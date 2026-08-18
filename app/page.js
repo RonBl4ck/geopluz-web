@@ -10,6 +10,7 @@ import PresentationTablePanel from '@/components/PresentationTablePanel';
 import TicketConflictModal from '@/components/TicketConflictModal';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import { exportExcelBySed } from '@/lib/excelUtils';
+import { exportPdfReport } from '@/lib/pdfUtils';
 import { getCachedSeds, setCachedSeds } from '@/lib/dbCache';
 import { isSedMatch, isLlaveMatch } from '@/lib/sedUtils';
 import { CIRCUIT_STATUSES, hydrateLlave, serializeLlaveLines } from '@/lib/circuitAnalysis';
@@ -574,6 +575,14 @@ export default function Page() {
     await exportExcelBySed(dataToExport, currentSedId, currentLlaveId);
   }
 
+  async function handleExportPdf() {
+    const dataToExport = filteredPoints.length > 0 ? filteredPoints : numberedPointsList;
+    await exportPdfReport(dataToExport, currentSedId, currentLlaveId, {
+      status: currentAnalysis.status,
+      note: currentAnalysis.note
+    });
+  }
+
   // Permisos de edición
   async function checkEditPermission() {
     if (isEditable) return true;
@@ -1010,6 +1019,11 @@ export default function Page() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isPresentationMode, currentSedId, localDatabase]);
 
+  useEffect(() => {
+    setIsSegmentSelectionMode(false);
+    setSelectedLineIds([]);
+  }, [currentSedId, currentLlaveId]);
+
   const currentLlaveData = currentSedId && currentLlaveId && localDatabase[currentSedId]?.llaves?.[currentLlaveId]
     ? localDatabase[currentSedId].llaves[currentLlaveId]
     : null;
@@ -1037,11 +1051,15 @@ export default function Page() {
     });
   }
 
-  function handleSaveCircuitNote(note) {
+  async function handleSaveCircuitNote(note) {
+    const allowed = await checkEditPermission();
+    if (!allowed) return;
     updateCurrentLlaveAnalysis(analysis => ({ ...analysis, note }));
   }
 
-  function handleSaveCircuitStatus(status) {
+  async function handleSaveCircuitStatus(status) {
+    const allowed = await checkEditPermission();
+    if (!allowed) return;
     if (!CIRCUIT_STATUSES[status]) return;
     updateCurrentLlaveAnalysis(analysis => ({ ...analysis, status }));
   }
@@ -1051,19 +1069,74 @@ export default function Page() {
     setSelectedLineIds(prev => prev.includes(String(lineId)) ? prev.filter(id => id !== String(lineId)) : [...prev, String(lineId)]);
   }
 
-  function handleSaveCableGroup({ name, calibre, color }) {
-    if (!selectedLineIds.length) return;
-    const group = { id: `cable-${Date.now()}`, name: name || 'Tramo sin nombre', calibre, color, lineIds: selectedLineIds, distance: selectedDistance };
-    updateCurrentLlaveAnalysis(analysis => ({
-      ...analysis,
-      cableGroups: [...(analysis.cableGroups || []).filter(item => !item.lineIds?.some(id => selectedLineIds.includes(String(id)))), group]
-    }));
+  async function handleToggleSegmentSelection() {
+    if (!isSegmentSelectionMode) {
+      const allowed = await checkEditPermission();
+      if (!allowed) return;
+      setIsSegmentSelectionMode(true);
+      setSelectedLineIds([]);
+    } else {
+      setIsSegmentSelectionMode(false);
+      setSelectedLineIds([]);
+    }
+  }
+
+  async function handleStartEditCableGroup(group) {
+    const allowed = await checkEditPermission();
+    if (!allowed) return false;
+    setSelectedLineIds(group.lineIds ? group.lineIds.map(String) : []);
+    setIsSegmentSelectionMode(true);
+    return true;
+  }
+
+  function handleCancelEditCableGroup() {
     setSelectedLineIds([]);
     setIsSegmentSelectionMode(false);
   }
 
-  function handleDeleteCableGroup(groupId) {
-    updateCurrentLlaveAnalysis(analysis => ({ ...analysis, cableGroups: (analysis.cableGroups || []).filter(group => group.id !== groupId) }));
+  async function handleSaveCableGroup({ id, name, calibre, color }) {
+    const allowed = await checkEditPermission();
+    if (!allowed) return;
+    if (!selectedLineIds.length) return;
+
+    const groupId = id || `cable-${Date.now()}`;
+    const group = {
+      id: groupId,
+      name: name || 'Tramo sin nombre',
+      calibre,
+      color,
+      lineIds: selectedLineIds,
+      distance: selectedDistance
+    };
+
+    updateCurrentLlaveAnalysis(analysis => {
+      const existingGroups = analysis.cableGroups || [];
+      const cleanedGroups = existingGroups
+        .filter(item => item.id !== groupId)
+        .map(item => ({
+          ...item,
+          lineIds: item.lineIds ? item.lineIds.filter(lid => !selectedLineIds.includes(String(lid))) : []
+        }))
+        .filter(item => item.lineIds && item.lineIds.length > 0);
+
+      return {
+        ...analysis,
+        cableGroups: [...cleanedGroups, group]
+      };
+    });
+
+    setSelectedLineIds([]);
+    setIsSegmentSelectionMode(false);
+  }
+
+  async function handleDeleteCableGroup(groupId) {
+    const allowed = await checkEditPermission();
+    if (!allowed) return;
+    if (!confirm('¿Eliminar esta clasificación de calibre?')) return;
+    updateCurrentLlaveAnalysis(analysis => ({
+      ...analysis,
+      cableGroups: (analysis.cableGroups || []).filter(group => group.id !== groupId)
+    }));
   }
 
   async function handleEnterEditMode() {
@@ -1100,7 +1173,9 @@ export default function Page() {
           selectedDistance={selectedDistance}
           onSaveCircuitNote={handleSaveCircuitNote}
           onSaveCircuitStatus={handleSaveCircuitStatus}
-          onToggleSegmentSelection={() => { setIsSegmentSelectionMode(value => !value); setSelectedLineIds([]); }}
+          onToggleSegmentSelection={handleToggleSegmentSelection}
+          onStartEditCableGroup={handleStartEditCableGroup}
+          onCancelEditCableGroup={handleCancelEditCableGroup}
           onSaveCableGroup={handleSaveCableGroup}
           onDeleteCableGroup={handleDeleteCableGroup}
           onTogglePresentationMode={() => setIsPresentationMode(true)}
@@ -1109,6 +1184,7 @@ export default function Page() {
           onImportExcel={handleImportExcel}
           onExportJson={handleExportJson}
           onExportExcel={handleExportExcel}
+          onExportPdf={handleExportPdf}
           onSaveToMainDatabase={handleSaveToMainDatabase}
           onDeleteSed={handleDeleteSed}
           onDeleteLlave={handleDeleteLlave}
@@ -1160,12 +1236,12 @@ export default function Page() {
             onNextSed={() => navigateSed(1)}
             onToggleMapStyle={() => setCurrentMapStyle(s => s === 'clean' ? 'detailed' : 'clean')}
             onEnterEditMode={handleEnterEditMode}
-            onExportExcel={handleExportExcel}
           />
           <PresentationTablePanel
             points={filteredPoints}
             onRowClick={handleFlyToPoint}
             onExportExcel={handleExportExcel}
+            onExportPdf={handleExportPdf}
           />
         </>
       )}

@@ -6,6 +6,7 @@ import PresentationHUD from '@/components/PresentationHUD';
 import PresentationTablePanel from '@/components/PresentationTablePanel';
 import { supabase } from '@/lib/supabase';
 import { exportExcelBySed } from '@/lib/excelUtils';
+import { exportPdfReport } from '@/lib/pdfUtils';
 import { getCachedSeds, setCachedSeds } from '@/lib/dbCache';
 import { isSedMatch, isLlaveMatch } from '@/lib/sedUtils';
 import { hydrateLlave } from '@/lib/circuitAnalysis';
@@ -131,6 +132,14 @@ export default function PresentacionPage() {
     await exportExcelBySed(dataToExport, currentSedId, currentLlaveId);
   }
 
+  async function handleExportPdf() {
+    const dataToExport = filteredPoints.length > 0 ? filteredPoints : numberedPointsList;
+    await exportPdfReport(dataToExport, currentSedId, currentLlaveId, {
+      status: currentLlaveData?.analysis?.status || 'cargado',
+      note: currentLlaveData?.analysis?.note || ''
+    });
+  }
+
   // Navegación
   const sedsList = Object.keys(localDatabase);
   function navigateSed(dir) {
@@ -212,12 +221,12 @@ export default function PresentacionPage() {
         onNextSed={() => navigateSed(1)}
         onToggleMapStyle={() => setCurrentMapStyle(s => s === 'clean' ? 'detailed' : 'clean')}
         onEnterEditMode={() => { window.location.href = '/'; }}
-        onExportExcel={handleExportExcel}
       />
       <PresentationTablePanel
         points={filteredPoints}
         onRowClick={handleFlyToPoint}
         onExportExcel={handleExportExcel}
+        onExportPdf={handleExportPdf}
       />
     </>
   );

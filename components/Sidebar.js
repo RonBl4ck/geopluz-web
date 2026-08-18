@@ -29,6 +29,8 @@ export default function Sidebar({
   onSaveCircuitNote,
   onSaveCircuitStatus,
   onToggleSegmentSelection,
+  onStartEditCableGroup,
+  onCancelEditCableGroup,
   onSaveCableGroup,
   onDeleteCableGroup,
   onTogglePresentationMode,
@@ -37,6 +39,7 @@ export default function Sidebar({
   onImportExcel,
   onExportJson,
   onExportExcel,
+  onExportPdf,
   onSaveToMainDatabase,
   onDeleteSed,
   onDeleteLlave,
@@ -54,9 +57,17 @@ export default function Sidebar({
   const [cableCalibre, setCableCalibre] = useState('');
   const [cableColor, setCableColor] = useState('#ef6c00');
   const [statusDraft, setStatusDraft] = useState('cargado');
+  const [editingCableGroupId, setEditingCableGroupId] = useState(null);
 
   useEffect(() => setNoteDraft(circuitNote || ''), [circuitNote, currentSedId, currentLlaveId]);
   useEffect(() => setStatusDraft(circuitStatus || 'cargado'), [circuitStatus, currentSedId, currentLlaveId]);
+
+  useEffect(() => {
+    setEditingCableGroupId(null);
+    setCableName('');
+    setCableCalibre('');
+    setCableColor('#ef6c00');
+  }, [currentSedId, currentLlaveId]);
 
   useEffect(() => {
     fetch('/seds_master_db.min.json')
@@ -365,18 +376,163 @@ export default function Sidebar({
           </div>
           <div className="form-group" style={{ borderTop: '1px solid var(--border-color)', paddingTop: '10px' }}>
             <label>Clasificación de cable por tramos:</label>
-            <button className={`btn ${isSegmentSelectionMode ? 'btn-active-mode' : 'btn-orange'}`} disabled={!currentLlaveId} onClick={onToggleSegmentSelection}>
-              <i className="fa-solid fa-object-group"></i> {isSegmentSelectionMode ? 'Finalizar selección' : 'Seleccionar tramos en el mapa'}
+            <button 
+              className={`btn ${isSegmentSelectionMode ? 'btn-active-mode' : 'btn-orange'}`} 
+              disabled={!currentLlaveId} 
+              onClick={() => {
+                if (editingCableGroupId) {
+                  setEditingCableGroupId(null);
+                  setCableName('');
+                  setCableCalibre('');
+                  setCableColor('#ef6c00');
+                  onCancelEditCableGroup?.();
+                } else {
+                  onToggleSegmentSelection?.();
+                }
+              }}
+            >
+              <i className={`fa-solid ${editingCableGroupId ? 'fa-xmark' : 'fa-object-group'}`}></i> {isSegmentSelectionMode ? (editingCableGroupId ? 'Cancelar edición' : 'Finalizar selección') : 'Seleccionar tramos en el mapa'}
             </button>
-            {isSegmentSelectionMode && <div style={{ marginTop: '7px', fontSize: '11px', color: 'var(--accent-cyan)' }}>
-              Seleccionados: <b>{selectedLineCount}</b> · Distancia: <b>{selectedDistance.toFixed(0)} m</b>
-            </div>}
-            {selectedLineCount > 0 && <div style={{ display: 'grid', gap: '6px', marginTop: '8px' }}>
-              <input className="input-control" value={cableCalibre} onChange={(e) => setCableCalibre(e.target.value)} placeholder="Calibre (ej. 70 mm²)" />
-              <input className="input-control" value={cableName} onChange={(e) => setCableName(e.target.value)} placeholder="Nombre opcional del grupo" />
-              <div style={{ display: 'flex', gap: '6px' }}><input type="color" value={cableColor} onChange={(e) => setCableColor(e.target.value)} /><button className="btn btn-green" style={{ flex: 1 }} disabled={!cableCalibre.trim()} onClick={() => { onSaveCableGroup({ name: cableName.trim(), calibre: cableCalibre.trim(), color: cableColor }); setCableName(''); setCableCalibre(''); }}>Guardar calibre</button></div>
-            </div>}
-            {(cableGroups || []).map(group => <div key={group.id} style={{ display: 'flex', gap: '6px', alignItems: 'center', marginTop: '7px', fontSize: '10.5px' }}><span style={{ width: 12, height: 12, borderRadius: 2, background: group.color }}></span><span style={{ flex: 1 }}><b>{group.calibre}</b>{group.name ? ` · ${group.name}` : ''} · {Number(group.distance || 0).toFixed(0)} m</span><button className="btn btn-outline" style={{ width: 'auto', padding: '3px 6px', color: '#ff1744' }} onClick={() => onDeleteCableGroup(group.id)} title="Eliminar clasificación"><i className="fa-solid fa-trash"></i></button></div>)}
+            
+            {isSegmentSelectionMode && (
+              <div style={{
+                marginTop: '7px',
+                padding: '6px 8px',
+                borderRadius: '4px',
+                background: editingCableGroupId ? 'rgba(255, 171, 0, 0.12)' : 'rgba(0, 229, 255, 0.1)',
+                border: `1px solid ${editingCableGroupId ? '#ffab00' : 'rgba(0, 229, 255, 0.3)'}`,
+                fontSize: '11px'
+              }}>
+                <div style={{ fontWeight: 'bold', color: editingCableGroupId ? '#ffab00' : 'var(--accent-cyan)', marginBottom: '3px' }}>
+                  <i className={editingCableGroupId ? 'fa-solid fa-pen-to-square' : 'fa-solid fa-object-group'}></i> {editingCableGroupId ? 'Editando tramo y calibre' : 'Modo Selección de Tramos'}
+                </div>
+                <div style={{ color: 'var(--text-muted)' }}>
+                  Seleccionados: <b style={{ color: 'var(--text-primary)' }}>{selectedLineCount}</b> · Longitud: <b style={{ color: 'var(--text-primary)' }}>{selectedDistance.toFixed(0)} m</b>
+                </div>
+                <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                  💡 Haz clic en los tramos del mapa para sumarlos o quitarlos.
+                </div>
+              </div>
+            )}
+
+            {(selectedLineCount > 0 || editingCableGroupId) && (
+              <div style={{ display: 'grid', gap: '6px', marginTop: '8px' }}>
+                <input 
+                  className="input-control" 
+                  value={cableCalibre} 
+                  onChange={(e) => setCableCalibre(e.target.value)} 
+                  placeholder="Calibre (ej. 70 mm²)" 
+                />
+                <input 
+                  className="input-control" 
+                  value={cableName} 
+                  onChange={(e) => setCableName(e.target.value)} 
+                  placeholder="Nombre opcional del grupo (ej. Troncal principal)" 
+                />
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  <input 
+                    type="color" 
+                    value={cableColor} 
+                    onChange={(e) => setCableColor(e.target.value)} 
+                    style={{ width: '40px', height: '34px', padding: '2px', cursor: 'pointer' }}
+                  />
+                  <button 
+                    className={`btn ${editingCableGroupId ? 'btn-orange' : 'btn-green'}`} 
+                    style={{ flex: 1 }} 
+                    disabled={!cableCalibre.trim() || selectedLineCount === 0} 
+                    onClick={() => {
+                      onSaveCableGroup({
+                        id: editingCableGroupId,
+                        name: cableName.trim(),
+                        calibre: cableCalibre.trim(),
+                        color: cableColor
+                      });
+                      setEditingCableGroupId(null);
+                      setCableName('');
+                      setCableCalibre('');
+                      setCableColor('#ef6c00');
+                    }}
+                  >
+                    <i className={editingCableGroupId ? 'fa-solid fa-check' : 'fa-solid fa-floppy-disk'}></i> {editingCableGroupId ? 'Actualizar calibre' : 'Guardar calibre'}
+                  </button>
+                  {editingCableGroupId && (
+                    <button 
+                      className="btn btn-outline" 
+                      style={{ width: 'auto', padding: '0 10px' }} 
+                      onClick={() => {
+                        setEditingCableGroupId(null);
+                        setCableName('');
+                        setCableCalibre('');
+                        setCableColor('#ef6c00');
+                        onCancelEditCableGroup?.();
+                      }} 
+                      title="Cancelar edición"
+                    >
+                      Cancelar
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {(cableGroups || []).map(group => {
+              const isCurrentlyEditing = editingCableGroupId === group.id;
+              return (
+                <div 
+                  key={group.id} 
+                  style={{ 
+                    display: 'flex', 
+                    gap: '6px', 
+                    alignItems: 'center', 
+                    marginTop: '7px', 
+                    fontSize: '10.5px',
+                    padding: '4px 6px',
+                    borderRadius: '4px',
+                    background: isCurrentlyEditing ? 'rgba(255, 171, 0, 0.15)' : 'transparent',
+                    border: isCurrentlyEditing ? '1px solid #ffab00' : '1px solid transparent'
+                  }}
+                >
+                  <span style={{ width: 12, height: 12, borderRadius: 2, background: group.color, flexShrink: 0 }}></span>
+                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <b>{group.calibre}</b>{group.name ? ` · ${group.name}` : ''} · {Number(group.distance || 0).toFixed(0)} m
+                  </span>
+                  <button 
+                    className="btn btn-outline" 
+                    style={{ width: 'auto', padding: '3px 6px', color: 'var(--accent-cyan)' }} 
+                    onClick={async () => {
+                      if (onStartEditCableGroup) {
+                        const allowed = await onStartEditCableGroup(group);
+                        if (allowed) {
+                          setEditingCableGroupId(group.id);
+                          setCableCalibre(group.calibre || '');
+                          setCableName(group.name || '');
+                          setCableColor(group.color || '#ef6c00');
+                        }
+                      }
+                    }} 
+                    title="Editar este calibre y sus tramos"
+                  >
+                    <i className="fa-solid fa-pen-to-square"></i>
+                  </button>
+                  <button 
+                    className="btn btn-outline" 
+                    style={{ width: 'auto', padding: '3px 6px', color: '#ff1744' }} 
+                    onClick={() => {
+                      if (editingCableGroupId === group.id) {
+                        setEditingCableGroupId(null);
+                        setCableName('');
+                        setCableCalibre('');
+                        setCableColor('#ef6c00');
+                      }
+                      onDeleteCableGroup(group.id);
+                    }} 
+                    title="Eliminar clasificación"
+                  >
+                    <i className="fa-solid fa-trash"></i>
+                  </button>
+                </div>
+              );
+            })}
           </div>
         </div>
 
@@ -405,18 +561,36 @@ export default function Sidebar({
           </div>
         </div>
 
-        {/* Tarjeta 5: Exportar Análisis a Excel */}
+        {/* Tarjeta 5: Exportar Análisis a Excel y PDF */}
         <div className="card">
           <div className="card-title">
-            <i className="fa-solid fa-file-excel" style={{ color: '#2e7d32' }}></i> 5. Exportar Análisis a Excel
+            <i className="fa-solid fa-file-export" style={{ color: '#2e7d32' }}></i> 5. Exportar Reportes (Excel / PDF)
           </div>
-          <button 
-            className="btn btn-green" 
-            onClick={onExportExcel}
-            disabled={faultPoints.length === 0}
-          >
-            <i className="fa-solid fa-file-excel"></i> Exportar Excel (Hojas por SED + Captura Imagen + 7 Cols)
-          </button>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <button 
+              className="btn btn-green" 
+              onClick={onExportExcel}
+              disabled={faultPoints.length === 0}
+              title="Exporta archivo .xlsx con captura del plano de circuito y tabla estructurada"
+            >
+              <i className="fa-solid fa-file-excel"></i> Exportar a Excel (.xlsx)
+            </button>
+            <button 
+              className="btn" 
+              onClick={onExportPdf}
+              disabled={faultPoints.length === 0}
+              style={{
+                background: 'linear-gradient(135deg, #c0392b, #962d22)',
+                color: '#ffffff',
+                border: '1px solid #e74c3c',
+                cursor: faultPoints.length === 0 ? 'not-allowed' : 'pointer',
+                opacity: faultPoints.length === 0 ? 0.6 : 1
+              }}
+              title="Genera reporte formal en PDF con imagen del circuito y tabla de fallas"
+            >
+              <i className="fa-solid fa-file-pdf"></i> Descargar Reporte Técnico (PDF)
+            </button>
+          </div>
         </div>
 
         {/* Tarjeta 6: Visor / Modo Presentación Ejecutiva */}
