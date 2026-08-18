@@ -10,6 +10,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.49.0",
     "browser-image-compression": "^2.0.2",
+    "canvg": "^3.0.11",
     "exceljs": "^4.4.0",
     "googleapis": "^144.0.0",
     "html2canvas": "^1.4.1",
