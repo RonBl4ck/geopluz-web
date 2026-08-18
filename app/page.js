@@ -8,6 +8,7 @@ import FaultForm from '@/components/FaultForm';
 import PresentationHUD from '@/components/PresentationHUD';
 import PresentationTablePanel from '@/components/PresentationTablePanel';
 import TicketConflictModal from '@/components/TicketConflictModal';
+import { sortSedIds } from '@/components/SearchableSedSelect';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import { exportExcelBySed } from '@/lib/excelUtils';
 import { exportPdfReport } from '@/lib/pdfUtils';
@@ -985,12 +986,12 @@ export default function Page() {
 
   function handleFlyToPoint(point) {
     if (mapRef.current && point.coords) {
-      mapRef.current.flyTo(point.coords, 18);
+      mapRef.current.flyToPoint(point.coords, 18);
     }
   }
 
   // Navegación
-  const sedsList = Object.keys(localDatabase);
+  const sedsList = sortSedIds(Object.keys(localDatabase));
   function navigateSed(dir) {
     if (sedsList.length === 0) return;
     const currentIndex = sedsList.indexOf(currentSedId);
@@ -1094,7 +1095,7 @@ export default function Page() {
     setIsSegmentSelectionMode(false);
   }
 
-  async function handleSaveCableGroup({ id, name, calibre, color }) {
+  async function handleSaveCableGroup({ id, name, calibre, color, note }) {
     const allowed = await checkEditPermission();
     if (!allowed) return;
     if (!selectedLineIds.length) return;
@@ -1105,6 +1106,7 @@ export default function Page() {
       name: name || 'Tramo sin nombre',
       calibre,
       color,
+      note: note || '',
       lineIds: selectedLineIds,
       distance: selectedDistance
     };
@@ -1191,6 +1193,7 @@ export default function Page() {
           onEditPoint={(idx) => { setEditingPointIndex(idx); setIsFormOpen(true); }}
           onDeletePoint={handleDeletePoint}
           onRelocatePoint={handleRelocatePoint}
+          onFlyToPoint={(point) => mapRef.current?.flyToPoint?.(point.coords, 18, { accountForSidebar: true })}
         />
       )}
       

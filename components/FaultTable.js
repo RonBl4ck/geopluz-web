@@ -3,196 +3,74 @@
 import { useState } from 'react';
 import { getCauseCategory } from '@/lib/constants';
 
-export default function FaultTable({
-  points = [],
-  showActions = false,
-  onEdit,
-  onDelete,
-  onRelocate,
-  onRowClick,
-  className = ''
-}) {
-  const [selectedGallery, setSelectedGallery] = useState(null);
+function CauseBadge({ value }) {
+  if (!value) return '-';
+  const category = getCauseCategory(value);
+  return <span className="cause-badge" style={{ backgroundColor: category.color, color: category.textColor || '#fff' }}>{value}</span>;
+}
 
-  if (points.length === 0) {
-    return (
-      <table className={`points-table ${className}`}>
-        <thead>
-          <tr>
-            <th>NRO</th>
-            <th>TICKET</th>
-            <th>SED-LLAVE</th>
-            <th>FALLA REAL</th>
-            <th>CAUSA</th>
-            <th>SUMINISTRO</th>
-            <th>EVIDENCIA</th>
-            <th>ACCIÓN</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td colSpan={10} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
-              No hay registros marcados.
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    );
+export default function FaultTable({ points = [], showActions = false, onEdit, onDelete, onRelocate, onRowClick, className = '' }) {
+  const [selectedGallery, setSelectedGallery] = useState(null);
+  const [showFullView, setShowFullView] = useState(false);
+
+  function renderActions(pt, idx, hasCoords) {
+    if (!showActions) return null;
+    const pointIndex = pt.originalIndex !== undefined ? pt.originalIndex : idx;
+    return <div className="fault-row-actions">
+      <button onClick={(e) => { e.stopPropagation(); onRelocate?.(pointIndex); }} title={hasCoords ? 'Reubicar en mapa' : 'Ubicar en mapa'}><i className="fa-solid fa-crosshairs"></i></button>
+      <button onClick={(e) => { e.stopPropagation(); onEdit?.(pointIndex); }} title="Editar datos"><i className="fa-solid fa-pen-to-square"></i></button>
+      <button className="danger" onClick={(e) => { e.stopPropagation(); onDelete?.(pointIndex); }} title="Eliminar registro"><i className="fa-solid fa-trash"></i></button>
+    </div>;
   }
 
-  return (
-    <>
-      <table className={`points-table ${className}`}>
-        <thead>
-          <tr>
-            <th>NRO</th>
-            <th>TICKET</th>
-            <th>SED-LLAVE</th>
-            <th>FALLA REAL</th>
-            <th>CAUSA</th>
-            <th>NOTA ESPECÍFICA</th>
-            <th>CROQUIS</th>
-            <th>SUMINISTRO</th>
-            <th>EVIDENCIA</th>
-            <th>ACCIÓN</th>
-          </tr>
-        </thead>
-        <tbody>
-          {points.map((pt, idx) => {
-            const displayNum = pt.localNumber || pt.number;
-            const isMulti = pt.coords && Array.isArray(pt.coords[0]);
-            const hasCoords = pt.coords && (isMulti ? pt.coords.length > 0 : (!isNaN(pt.coords[0]) && !isNaN(pt.coords[1])));
-            const fotosCount = pt.fotos ? pt.fotos.length : 0;
-            const causeCat = getCauseCategory(pt.causa);
+  function renderRows(full = false) {
+    return points.map((pt, idx) => {
+      const displayNum = pt.localNumber || pt.number || idx + 1;
+      const isMulti = Array.isArray(pt.coords?.[0]);
+      const hasCoords = Boolean(pt.coords && (isMulti ? pt.coords.length : !isNaN(pt.coords[0]) && !isNaN(pt.coords[1])));
+      const croquis = pt.linkCroquis || pt.link_croquis || pt.croquis;
+      const fotosCount = pt.fotos?.length || 0;
+      return <tr key={pt.id || pt.ticket || idx} onClick={() => onRowClick?.(pt)} className={onRowClick ? 'pres-table-row' : ''}>
+        <td><b className="fault-number">{displayNum}</b></td>
+        <td className="ticket-cell">{pt.ticket || '-'}{isMulti && <small>2 puntos</small>}{!hasCoords && <small className="warning">Sin GPS</small>}</td>
+        <td>{pt.horaInicio || '-'}</td>
+        {full && <td>{pt.sedLlave || `${pt.sed || ''}-${pt.llaveSistema || ''}`}</td>}
+        {full && <td>{pt.falla || pt.fallaReal || '-'}</td>}
+        <td className="cause-cell"><CauseBadge value={pt.causa} /></td>
+        {full && <td>{pt.suministro || '-'}</td>}
+        {full && <td className="detail-text">{pt.nota || '-'}</td>}
+        <td>{croquis ? <a href={croquis} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="table-link">Ver</a> : '-'}</td>
+        {full && <td>{fotosCount ? <button className="table-link-button" onClick={(e) => { e.stopPropagation(); setSelectedGallery(pt); }}><i className="fa-solid fa-camera"></i> {fotosCount}</button> : 'Sin foto'}</td>}
+        {showActions && <td>{renderActions(pt, idx, hasCoords)}</td>}
+      </tr>;
+    });
+  }
 
-            return (
-              <tr 
-                key={idx} 
-                onClick={() => onRowClick && onRowClick(pt)}
-                className={onRowClick ? 'pres-table-row' : ''}
-              >
-                <td>
-                  <b style={{ color: 'var(--accent-danger)' }}>({displayNum})</b>
-                </td>
-                <td>
-                  {pt.ticket} {isMulti && <span style={{ color: '#ed6c02', fontSize: '9.5px', fontWeight: 'bold' }}>[📍 2 Puntos]</span>} {!hasCoords && <span style={{ color: 'red', fontSize: '9px' }}>[Sin GPS]</span>}
-                </td>
-                <td>{pt.sedLlave}</td>
-                <td>{pt.falla || pt.fallaReal}</td>
-                <td>
-                  {pt.causa ? (
-                    <span style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      backgroundColor: causeCat.color,
-                      color: causeCat.textColor || '#ffffff',
-                      padding: '2px 8px',
-                      borderRadius: '10px',
-                      fontSize: '10px',
-                      fontWeight: 'bold',
-                      whiteSpace: 'nowrap',
-                      boxShadow: '0 1px 3px rgba(0,0,0,0.2)'
-                    }}>
-                      {pt.causa}
-                    </span>
-                  ) : '-'}
-                </td>
+  return <>
+    <div className="fault-table-toolbar">
+      <span>{points.length} {points.length === 1 ? 'registro' : 'registros'}</span>
+      <button className="secondary-action" onClick={() => setShowFullView(true)} disabled={!points.length}><i className="fa-solid fa-table-columns"></i> Vista completa</button>
+    </div>
+    <table className={`points-table points-table-compact ${className}`}>
+      <thead><tr><th>NRO</th><th>TICKET</th><th>INICIO</th><th>CAUSA</th><th>CROQUIS</th>{showActions && <th>ACCIONES</th>}</tr></thead>
+      <tbody>{points.length ? renderRows(false) : <tr><td colSpan={showActions ? 6 : 5} className="empty-table">No hay registros marcados.</td></tr>}</tbody>
+    </table>
 
-                <td style={{ fontSize: '10.5px', color: 'var(--text-muted)' }}>{pt.nota || '-'}</td>
-                <td>
-                  {(pt.linkCroquis || pt.link_croquis || pt.croquis) ? (
-                    <a
-                      href={pt.linkCroquis || pt.link_croquis || pt.croquis}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      onClick={(e) => e.stopPropagation()}
-                      style={{ color: 'var(--accent-cyan)', fontWeight: 'bold', textDecoration: 'underline', fontSize: '11px' }}
-                    >
-                      🗺️ Ver Croquis ↗
-                    </a>
-                  ) : (
-                    <span style={{ color: 'var(--text-muted)', fontSize: '10px' }}>-</span>
-                  )}
-                </td>
-                <td>{pt.suministro}</td>
-                <td>
-                  {fotosCount > 0 ? (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); setSelectedGallery(pt); }}
-                      style={{ background: 'rgba(0, 229, 255, 0.15)', border: '1px solid var(--accent-cyan)', color: 'var(--accent-cyan)', borderRadius: '12px', padding: '2px 8px', fontSize: '10px', fontWeight: 'bold', cursor: 'pointer' }}
-                      title="Ver Evidencias Fotográficas"
-                    >
-                      <i className="fa-solid fa-camera"></i> {fotosCount} foto(s)
-                    </button>
-                  ) : (
-                    <span style={{ color: 'var(--text-muted)', fontSize: '10px' }}>Sin foto</span>
-                  )}
-                </td>
-                <td>
-                  {showActions ? (
-                    <>
-                      <button 
-                        onClick={(e) => { e.stopPropagation(); onRelocate && onRelocate(pt.originalIndex !== undefined ? pt.originalIndex : idx); }} 
-                        title={hasCoords ? 'Reubicar en Mapa' : 'Ubicar en Mapa'} 
-                        style={{ background: 'none', border: 'none', color: 'var(--accent-warning)', cursor: 'pointer', marginRight: '6px' }}
-                      >
-                        <i className="fa-solid fa-crosshairs"></i> {hasCoords ? 'Reubicar' : '📍 Ubicar'}
-                      </button>
-                      <button 
-                        onClick={(e) => { e.stopPropagation(); onEdit && onEdit(pt.originalIndex !== undefined ? pt.originalIndex : idx); }} 
-                        title="Editar Datos" 
-                        style={{ background: 'none', border: 'none', color: 'var(--accent-cyan)', cursor: 'pointer', marginRight: '6px' }}
-                      >
-                        <i className="fa-solid fa-pen-to-square"></i>
-                      </button>
-                      <button 
-                        onClick={(e) => { e.stopPropagation(); onDelete && onDelete(pt.originalIndex !== undefined ? pt.originalIndex : idx); }} 
-                        title="Eliminar Registro" 
-                        style={{ background: 'none', border: 'none', color: 'red', cursor: 'pointer' }}
-                      >
-                        <i className="fa-solid fa-trash"></i>
-                      </button>
-                    </>
-                  ) : (
-                    <span style={{ color: 'var(--accent-green)', fontWeight: 'bold' }}>Atendido</span>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+    {showFullView && <div className="modal-backdrop active fault-full-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setShowFullView(false)}>
+      <div className="fault-full-modal">
+        <div className="modal-heading"><div><h3>Registro de fallas</h3><span>{points.length} registros · información completa</span></div><button className="icon-button" onClick={() => setShowFullView(false)} title="Cerrar"><i className="fa-solid fa-xmark"></i></button></div>
+        <div className="fault-full-table-wrap"><table className="points-table points-table-full">
+          <thead><tr><th>NRO</th><th>TICKET</th><th>INICIO</th><th>SED-LLAVE</th><th>FALLA REAL</th><th>CAUSA</th><th>SUMINISTRO</th><th>NOTA</th><th>CROQUIS</th><th>EVIDENCIA</th>{showActions && <th>ACCIONES</th>}</tr></thead>
+          <tbody>{renderRows(true)}</tbody>
+        </table></div>
+      </div>
+    </div>}
 
-      {/* Modal Galería Fotográfica de Evidencia */}
-      {selectedGallery && (
-        <div className="modal-backdrop active" style={{ zIndex: 10005 }}>
-          <div className="point-form-modal" style={{ width: '640px', background: 'var(--bg-secondary)' }}>
-            <h3 style={{ color: 'var(--accent-cyan)', fontSize: '14px', marginBottom: '10px', display: 'flex', justifyContent: 'space-between' }}>
-              <span>📸 Evidencias Fotográficas: Ticket {selectedGallery.ticket}</span>
-              <span onClick={() => setSelectedGallery(null)} style={{ cursor: 'pointer', color: 'var(--text-muted)' }}>&times;</span>
-            </h3>
-            
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '10px', maxHeight: '400px', overflowY: 'auto', padding: '6px' }}>
-              {selectedGallery.fotos.map((foto, i) => (
-                <div key={i} style={{ border: '1px solid var(--border-color)', borderRadius: '8px', overflow: 'hidden', background: '#000' }}>
-                  <a href={foto.url} target="_blank" rel="noopener noreferrer">
-                    <img src={foto.url} alt={foto.name} style={{ width: '100%', height: '140px', objectFit: 'cover' }} />
-                  </a>
-                  <div style={{ padding: '6px', fontSize: '10px', color: '#fff', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
-                    {foto.name}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '12px' }}>
-              <button className="btn btn-outline" style={{ width: 'auto', padding: '6px 16px' }} onClick={() => setSelectedGallery(null)}>
-                Cerrar Galería
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </>
-  );
+    {selectedGallery && <div className="modal-backdrop active" style={{ zIndex: 10005 }}>
+      <div className="point-form-modal evidence-modal">
+        <div className="modal-heading"><div><h3>Evidencias fotográficas</h3><span>Ticket {selectedGallery.ticket}</span></div><button className="icon-button" onClick={() => setSelectedGallery(null)} title="Cerrar"><i className="fa-solid fa-xmark"></i></button></div>
+        <div className="evidence-grid">{selectedGallery.fotos.map((foto, i) => <a key={i} href={foto.url} target="_blank" rel="noopener noreferrer" className="evidence-item"><img src={foto.url} alt={foto.name || `Evidencia ${i + 1}`} /><span>{foto.name || `Evidencia ${i + 1}`}</span></a>)}</div>
+      </div>
+    </div>}
+  </>;
 }

@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import PresentationHUD from '@/components/PresentationHUD';
 import PresentationTablePanel from '@/components/PresentationTablePanel';
+import { sortSedIds } from '@/components/SearchableSedSelect';
 import { supabase } from '@/lib/supabase';
 import { exportExcelBySed } from '@/lib/excelUtils';
 import { exportPdfReport } from '@/lib/pdfUtils';
@@ -123,7 +124,7 @@ export default function PresentacionPage() {
 
   function handleFlyToPoint(point) {
     if (mapRef.current && point.coords) {
-      mapRef.current.flyTo(point.coords, 18);
+      mapRef.current.flyToPoint(point.coords, 18);
     }
   }
 
@@ -141,7 +142,7 @@ export default function PresentacionPage() {
   }
 
   // Navegación
-  const sedsList = Object.keys(localDatabase);
+  const sedsList = sortSedIds(Object.keys(localDatabase));
   function navigateSed(dir) {
     if (sedsList.length === 0) return;
     const currentIndex = sedsList.indexOf(currentSedId);

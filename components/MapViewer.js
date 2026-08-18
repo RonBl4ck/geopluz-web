@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useImperativeHandle, forwardRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useImperativeHandle, forwardRef, useCallback, useMemo } from 'react';
 import { fixCoord, getWeightForZoom } from '@/lib/coordUtils';
 import { TILE_LAYERS, MAP_DEFAULT_CENTER, MAP_DEFAULT_ZOOM, MAP_MAX_ZOOM, FAULT_CAUSES, DEFAULT_CAUSE_COLOR, getCauseCategory } from '@/lib/constants';
 
@@ -33,10 +33,17 @@ const MapViewer = forwardRef(({
   const networkLayerGroupRef = useRef(null);
   const pointsLayerGroupRef = useRef(null);
   const sedMarkerRef = useRef(null);
+  const pointMarkersRef = useRef([]);
   const fittedCircuitRef = useRef(null);
   const [sedsMasterDB, setSedsMasterDB] = useState({});
   const [mapViewport, setMapViewport] = useState({ bounds: null, zoom: MAP_DEFAULT_ZOOM });
   const [showLegend, setShowLegend] = useState(true);
+  const faultCauseCounts = useMemo(() => {
+    const counts = Object.fromEntries(FAULT_CAUSES.map(cause => [cause.id, 0]));
+    counts[DEFAULT_CAUSE_COLOR.id] = 0;
+    (faultPoints || []).forEach(point => { const category = getCauseCategory(point.causa); counts[category.id] = (counts[category.id] || 0) + 1; });
+    return counts;
+  }, [faultPoints]);
 
   useEffect(() => {
     fetch('/seds_master_db.min.json')
@@ -61,6 +68,15 @@ const MapViewer = forwardRef(({
       if (mapInstanceRef.current) {
         mapInstanceRef.current.flyTo(coords, zoom, { duration: 1.5 });
       }
+    },
+    flyToPoint: (coords, zoom = 18) => {
+      if (!mapInstanceRef.current || !coords) return;
+      const target = Array.isArray(coords[0]) ? coords[0] : coords;
+      mapInstanceRef.current.flyTo(target, zoom, { duration: 1.1 });
+      window.setTimeout(() => {
+        const marker = pointMarkersRef.current.find(item => item.coords[0] === target[0] && item.coords[1] === target[1]);
+        marker?.marker.openPopup();
+      }, 700);
     },
     invalidateSize: () => {
       if (mapInstanceRef.current) {
@@ -127,7 +143,11 @@ const MapViewer = forwardRef(({
 
     mapInstanceRef.current = map;
 
+    const resizeObserver = new ResizeObserver(() => map.invalidateSize({ pan: false }));
+    resizeObserver.observe(mapRef.current);
+
     return () => {
+      resizeObserver.disconnect();
       if (mapInstanceRef.current) {
         mapInstanceRef.current.remove();
         mapInstanceRef.current = null;
@@ -227,14 +247,14 @@ const MapViewer = forwardRef(({
     if (fixedSedCoord && fixedSedCoord[0] !== 0 && fixedSedCoord[1] !== 0) {
       const sedIcon = L.divIcon({
         className: 'sed-substation-wrapper',
-        html: `<div class="sed-substation-icon" title="SED ${sedId} (Arrastra para mover la SED)">⚡</div>`,
+        html: `<div class="sed-substation-icon ${isPresentationMode ? 'is-readonly' : ''}" title="SED ${sedId}${isPresentationMode ? '' : ' (Arrastra para mover la SED)'}">⚡</div>`,
         iconSize: [22, 22],
         iconAnchor: [11, 11]
       });
 
       sedMarkerRef.current = L.marker(fixedSedCoord, {
         icon: sedIcon,
-        draggable: true,
+        draggable: !isPresentationMode,
         zIndexOffset: 2000
       }).addTo(networkGroup);
 
@@ -252,16 +272,17 @@ const MapViewer = forwardRef(({
           </div>`;
         }
 
-        tooltipContent += `<div style="margin-top:4px; font-size:9.5px; color:#666;">💡 Arrastra este marcador si deseas ajustar su posición</div></div>`;
+        if (!isPresentationMode) tooltipContent += `<div style="margin-top:4px; font-size:9.5px; color:#666;">Arrastra este marcador para ajustar su posición</div>`;
+        tooltipContent += '</div>';
 
         sedMarkerRef.current.bindTooltip(tooltipContent, { sticky: true });
       }
 
-      sedMarkerRef.current.on('dragend', (e) => {
+      if (!isPresentationMode) sedMarkerRef.current.on('dragend', (e) => {
         const marker = e.target;
         const position = marker.getLatLng();
         if (onSedDragEnd) {
-          onSedDragEnd([position.lat, position.lng]);
+          onSedDragEnd(sedId, { lat: position.lat, lng: position.lng });
         }
       });
 
@@ -274,7 +295,7 @@ const MapViewer = forwardRef(({
       mapInstanceRef.current.fitBounds(bounds, { padding: [50, 50], maxZoom: 18, animate: true });
       fittedCircuitRef.current = circuitId;
     }
-  }, [llaveData, sedCoord, sedId, currentTheme, sedsMasterDB, cableGroups, isSegmentSelectionMode, selectedLineIds, onLineClick]);
+  }, [llaveData, sedCoord, sedId, currentTheme, sedsMasterDB, cableGroups, isSegmentSelectionMode, selectedLineIds, onLineClick, isPresentationMode, circuitId]);
 
   // Dibujar puntos de falla
   useEffect(() => {
@@ -283,6 +304,7 @@ const MapViewer = forwardRef(({
     
     const pointsGroup = pointsLayerGroupRef.current;
     pointsGroup.clearLayers();
+    pointMarkersRef.current = [];
 
     if (faultPoints && faultPoints.length > 0) {
       const mapBounds = mapViewport.bounds || (mapInstanceRef.current ? mapInstanceRef.current.getBounds() : null);
@@ -338,6 +360,7 @@ const MapViewer = forwardRef(({
           });
 
           const marker = L.marker(coord, { icon: pointIcon }).addTo(pointsGroup);
+          pointMarkersRef.current.push({ coords: coord, marker });
           
           const subInfo = coordsList.length > 1 ? ` (Punto ${subIdx + 1} de ${coordsList.length})` : '';
 
@@ -400,7 +423,7 @@ const MapViewer = forwardRef(({
   }, [isAddPointMode, isRelocating]);
 
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+    <div className={`map-viewer ${isPresentationMode ? 'is-presentation' : 'is-editing'}`} style={{ position: 'relative', width: '100%', height: '100%' }}>
       <div id="map" ref={mapRef} style={{ width: '100%', height: '100%' }}></div>
 
       {circuitNote && (
@@ -415,7 +438,7 @@ const MapViewer = forwardRef(({
           background: currentTheme === 'dark' ? 'rgba(18,25,44,.94)' : 'rgba(255,255,255,.96)',
           color: currentTheme === 'dark' ? '#e0f7fa' : '#1a202c',
           border: `1px solid ${currentTheme === 'dark' ? 'rgba(0,229,255,.35)' : '#9fb3c8'}`,
-          boxShadow: '0 3px 12px rgba(0,0,0,.22)',
+          boxShadow: 'none',
           fontSize: '11px',
           lineHeight: 1.45,
           transition: 'top 0.3s ease'
@@ -456,12 +479,12 @@ const MapViewer = forwardRef(({
           background: currentTheme === 'dark' ? 'rgba(18,25,44,.94)' : 'rgba(255,255,255,.96)',
           color: currentTheme === 'dark' ? '#e0f7fa' : '#1a202c',
           border: `1px solid ${currentTheme === 'dark' ? 'rgba(0,229,255,.3)' : '#cbd5e0'}`,
-          boxShadow: '0 3px 12px rgba(0,0,0,.2)',
+          boxShadow: 'none',
           fontSize: '10.5px',
           transition: 'top 0.3s ease'
         }}>
           <div style={{ fontWeight: 700, marginBottom: '6px' }}><i className="fa-solid fa-cable-car"></i> Calibres del circuito</div>
-          {cableGroups.map(group => <div key={group.id} style={{ display: 'flex', gap: '7px', alignItems: 'center', marginTop: '4px' }}><span style={{ width: 14, height: 4, background: group.color, borderRadius: 2 }}></span><span><b>{group.calibre}</b>{group.name ? ` · ${group.name}` : ''} ({Number(group.distance || 0).toFixed(0)} m)</span></div>)}
+          {cableGroups.map(group => <div key={group.id} style={{ display: 'flex', gap: '7px', alignItems: 'center', marginTop: '4px' }}><span style={{ width: 14, height: 4, background: group.color, borderRadius: 2 }}></span><span><b>{group.calibre}</b>{group.name ? ` · ${group.name}` : ''}{group.note ? ` · ${group.note}` : ''} ({Number(group.distance || 0).toFixed(0)} m)</span></div>)}
         </div>
       )}
 
@@ -475,7 +498,7 @@ const MapViewer = forwardRef(({
         backdropFilter: 'blur(8px)',
         border: `1px solid ${currentTheme === 'dark' ? 'rgba(0, 229, 255, 0.3)' : '#cbd5e0'}`,
         borderRadius: '8px',
-        boxShadow: '0 4px 15px rgba(0,0,0,0.25)',
+        boxShadow: 'none',
         padding: showLegend ? '10px 12px' : '6px 10px',
         maxWidth: '250px',
         transition: 'all 0.2s ease',
@@ -495,7 +518,7 @@ const MapViewer = forwardRef(({
           marginBottom: showLegend ? '8px' : '0'
         }} onClick={() => setShowLegend(!showLegend)}>
           <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <i className="fa-solid fa-palette" style={{ color: 'var(--accent-cyan)' }}></i> Leyenda de Causas
+            <i className="fa-solid fa-chart-simple" style={{ color: 'var(--accent-cyan)' }}></i> Causas · {faultPoints?.length || 0} fallas
           </span>
           <span style={{ fontSize: '10px', marginLeft: '8px', color: 'var(--accent-cyan)' }}>
             {showLegend ? '▼' : '▲'}
@@ -515,7 +538,7 @@ const MapViewer = forwardRef(({
                   flexShrink: 0,
                   boxShadow: '0 0 3px rgba(0,0,0,0.3)'
                 }}></span>
-                <span style={{ fontSize: '10.5px', fontWeight: 500 }}>{cause.label}</span>
+                <span style={{ fontSize: '10.5px', fontWeight: 500, flex: 1 }}>{cause.label}</span><b>{faultCauseCounts[cause.id] || 0}</b>
               </div>
             ))}
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', borderTop: `1px dashed ${currentTheme === 'dark' ? 'rgba(255,255,255,0.15)' : '#e2e8f0'}`, paddingTop: '4px', marginTop: '2px' }}>
@@ -531,6 +554,7 @@ const MapViewer = forwardRef(({
               <span style={{ fontSize: '10.5px', fontStyle: 'italic', color: currentTheme === 'dark' ? '#90a4ae' : '#64748b' }}>
                 {DEFAULT_CAUSE_COLOR.label}
               </span>
+              <b>{faultCauseCounts[DEFAULT_CAUSE_COLOR.id] || 0}</b>
             </div>
           </div>
         )}

@@ -2,7 +2,10 @@
 
 import { useRef, useState, useEffect } from 'react';
 import FaultTable from './FaultTable';
+import SearchableSedSelect, { sortSedIds } from './SearchableSedSelect';
 import { CIRCUIT_STATUSES } from '@/lib/circuitAnalysis';
+
+const CABLE_COLORS = ['#e53935', '#fb8c00', '#fdd835', '#43a047', '#00acc1', '#8e24aa', '#546e7a'];
 
 export default function Sidebar({
   seds,
@@ -45,7 +48,8 @@ export default function Sidebar({
   onDeleteLlave,
   onEditPoint,
   onDeletePoint,
-  onRelocatePoint
+  onRelocatePoint,
+  onFlyToPoint
 }) {
   const jsonInputRef = useRef(null);
   const excelInputRef = useRef(null);
@@ -55,7 +59,8 @@ export default function Sidebar({
   const [noteDraft, setNoteDraft] = useState('');
   const [cableName, setCableName] = useState('');
   const [cableCalibre, setCableCalibre] = useState('');
-  const [cableColor, setCableColor] = useState('#ef6c00');
+  const [cableColor, setCableColor] = useState(CABLE_COLORS[1]);
+  const [cableNote, setCableNote] = useState('');
   const [statusDraft, setStatusDraft] = useState('cargado');
   const [editingCableGroupId, setEditingCableGroupId] = useState(null);
 
@@ -66,7 +71,8 @@ export default function Sidebar({
     setEditingCableGroupId(null);
     setCableName('');
     setCableCalibre('');
-    setCableColor('#ef6c00');
+    setCableColor(CABLE_COLORS[1]);
+    setCableNote('');
   }, [currentSedId, currentLlaveId]);
 
   useEffect(() => {
@@ -127,7 +133,7 @@ export default function Sidebar({
     }
   };
 
-  const sedsList = Object.keys(seds || {});
+  const sedsList = sortSedIds(Object.keys(seds || {}));
   const hasData = sedsList.length > 0;
   
   const currentLlaves = currentSedId && seds[currentSedId] && seds[currentSedId].llaves 
@@ -158,6 +164,10 @@ export default function Sidebar({
             <i className={`fa-solid ${currentTheme === 'dark' ? 'fa-sun' : 'fa-moon'}`}></i>
             <span>{currentTheme === 'dark' ? 'Modo Claro' : 'Modo Oscuro'}</span>
           </button>
+          <button className="theme-toggle-btn mode-switch-btn" onClick={onTogglePresentationMode} title="Cambiar a modo presentación">
+            <i className="fa-solid fa-desktop"></i>
+            <span>Presentación</span>
+          </button>
         </div>
       </div>
 
@@ -179,10 +189,11 @@ export default function Sidebar({
           style={{ display: 'none' }}
         />
 
-        {/* Tarjeta 1: Carga y Fusión de JSONs */}
-        <div className="card">
+        <details className="sidebar-section">
+          <summary><span><i className="fa-solid fa-file-arrow-up"></i> 1. Carga de registros</span><i className="fa-solid fa-chevron-down section-chevron"></i></summary>
+        <div className="section-block">
           <div className="card-title">
-            <i className="fa-solid fa-layer-group"></i> 1. Carga & Fusión de Múltiples JSONs
+            <i className="fa-solid fa-layer-group"></i> Carga y fusión de JSON
           </div>
           <div className="form-group">
             <label>Estado de Base Local Acumulada:</label>
@@ -260,10 +271,9 @@ export default function Sidebar({
           )}
         </div>
 
-        {/* Tarjeta 2: Importar Excel */}
-        <div className="card">
+        <div className="section-block">
           <div className="card-title">
-            <i className="fa-solid fa-file-excel" style={{ color: '#2e7d32' }}></i> 2. Cargar Excel con Registros (.xlsx)
+            <i className="fa-solid fa-file-excel" style={{ color: '#2e7d32' }}></i> Cargar Excel con registros
           </div>
           <p style={{ fontSize: '10.5px', color: 'var(--text-muted)', marginBottom: '8px' }}>
             Importa Excel con columnas de Ticket, Falla Real, Coordenadas y pestañas por SED-Llave.
@@ -275,26 +285,18 @@ export default function Sidebar({
             <i className="fa-solid fa-upload"></i> Cargar Histórico Excel (.xlsx)
           </button>
         </div>
+        </details>
 
-        {/* Tarjeta 3: Selección y Gestión de SED y Llave */}
-        <div className="card">
+        <details className="sidebar-section" open>
+          <summary><span><i className="fa-solid fa-sitemap"></i> 2. Navegación y gestión de SEDs</span><i className="fa-solid fa-chevron-down section-chevron"></i></summary>
+        <div className="section-block">
           <div className="card-title">
-            <i className="fa-solid fa-sitemap"></i> 3. Navegación & Gestión de SEDs / Llaves
+            <i className="fa-solid fa-location-crosshairs"></i> Selección de circuito
           </div>
           <div className="form-group">
             <label>Subestación de Distribución (SED):</label>
             <div style={{ display: 'flex', gap: '6px' }}>
-              <select 
-                className="input-control"
-                style={{ flex: 1 }}
-                value={currentSedId || ''} 
-                onChange={(e) => setCurrentSedId(e.target.value)}
-              >
-                <option value="">{hasData ? '-- Seleccione una SED --' : '-- Carga un JSON o Excel primero --'}</option>
-                {sedsList.map(sed => (
-                  <option key={sed} value={sed}>{seds[sed]?.name || `SED ${sed}`}</option>
-                ))}
-              </select>
+              <SearchableSedSelect seds={seds} value={currentSedId || ''} onChange={setCurrentSedId} disabled={!hasData} />
               {currentSedId && (
                 <button 
                   className="btn btn-outline" 
@@ -354,10 +356,12 @@ export default function Sidebar({
             </div>
           )}
         </div>
+        </details>
 
-        {/* Tarjeta 4: Análisis técnico del circuito */}
-        <div className="card">
-          <div className="card-title"><i className="fa-solid fa-pen-to-square"></i> 4. Análisis del Circuito</div>
+        <details className="sidebar-section">
+          <summary><span><i className="fa-solid fa-chart-line"></i> 3. Análisis del circuito</span><i className="fa-solid fa-chevron-down section-chevron"></i></summary>
+        <div className="section-block">
+          <div className="card-title"><i className="fa-solid fa-pen-to-square"></i> Estado y conclusiones</div>
           <div className="form-group">
             <label>Estado del circuito:</label>
             <div style={{ display: 'flex', gap: '6px' }}>
@@ -384,7 +388,8 @@ export default function Sidebar({
                   setEditingCableGroupId(null);
                   setCableName('');
                   setCableCalibre('');
-                  setCableColor('#ef6c00');
+                  setCableColor(CABLE_COLORS[1]);
+                  setCableNote('');
                   onCancelEditCableGroup?.();
                 } else {
                   onToggleSegmentSelection?.();
@@ -429,13 +434,11 @@ export default function Sidebar({
                   onChange={(e) => setCableName(e.target.value)} 
                   placeholder="Nombre opcional del grupo (ej. Troncal principal)" 
                 />
+                <input className="input-control" value={cableNote} onChange={(e) => setCableNote(e.target.value)} placeholder="Nota o anotación (ej. Rama 1)" />
+                <div className="cable-color-picker" aria-label="Color de la rama">
+                  {CABLE_COLORS.map(color => <button key={color} type="button" className={cableColor === color ? 'active' : ''} style={{ backgroundColor: color }} onClick={() => setCableColor(color)} title={`Usar color ${color}`}><i className="fa-solid fa-check"></i></button>)}
+                </div>
                 <div style={{ display: 'flex', gap: '6px' }}>
-                  <input 
-                    type="color" 
-                    value={cableColor} 
-                    onChange={(e) => setCableColor(e.target.value)} 
-                    style={{ width: '40px', height: '34px', padding: '2px', cursor: 'pointer' }}
-                  />
                   <button 
                     className={`btn ${editingCableGroupId ? 'btn-orange' : 'btn-green'}`} 
                     style={{ flex: 1 }} 
@@ -445,12 +448,14 @@ export default function Sidebar({
                         id: editingCableGroupId,
                         name: cableName.trim(),
                         calibre: cableCalibre.trim(),
-                        color: cableColor
+                        color: cableColor,
+                        note: cableNote.trim()
                       });
                       setEditingCableGroupId(null);
                       setCableName('');
                       setCableCalibre('');
-                      setCableColor('#ef6c00');
+                      setCableColor(CABLE_COLORS[1]);
+                      setCableNote('');
                     }}
                   >
                     <i className={editingCableGroupId ? 'fa-solid fa-check' : 'fa-solid fa-floppy-disk'}></i> {editingCableGroupId ? 'Actualizar calibre' : 'Guardar calibre'}
@@ -463,7 +468,8 @@ export default function Sidebar({
                         setEditingCableGroupId(null);
                         setCableName('');
                         setCableCalibre('');
-                        setCableColor('#ef6c00');
+                        setCableColor(CABLE_COLORS[1]);
+                        setCableNote('');
                         onCancelEditCableGroup?.();
                       }} 
                       title="Cancelar edición"
@@ -494,7 +500,7 @@ export default function Sidebar({
                 >
                   <span style={{ width: 12, height: 12, borderRadius: 2, background: group.color, flexShrink: 0 }}></span>
                   <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    <b>{group.calibre}</b>{group.name ? ` · ${group.name}` : ''} · {Number(group.distance || 0).toFixed(0)} m
+                    <b>{group.calibre}</b>{group.name ? ` · ${group.name}` : ''}{group.note ? ` · ${group.note}` : ''} · {Number(group.distance || 0).toFixed(0)} m
                   </span>
                   <button 
                     className="btn btn-outline" 
@@ -506,7 +512,8 @@ export default function Sidebar({
                           setEditingCableGroupId(group.id);
                           setCableCalibre(group.calibre || '');
                           setCableName(group.name || '');
-                          setCableColor(group.color || '#ef6c00');
+                          setCableColor(group.color || CABLE_COLORS[1]);
+                          setCableNote(group.note || '');
                         }
                       }
                     }} 
@@ -522,7 +529,8 @@ export default function Sidebar({
                         setEditingCableGroupId(null);
                         setCableName('');
                         setCableCalibre('');
-                        setCableColor('#ef6c00');
+                        setCableColor(CABLE_COLORS[1]);
+                        setCableNote('');
                       }
                       onDeleteCableGroup(group.id);
                     }} 
@@ -536,10 +544,9 @@ export default function Sidebar({
           </div>
         </div>
 
-        {/* Tarjeta 4: Registro de Fallas Reparadas */}
-        <div className="card">
+        <div className="section-block">
           <div className="card-title">
-            <i className="fa-solid fa-location-dot" style={{ color: 'var(--accent-danger)' }}></i> 4. Registro de Fallas Reparadas
+            <i className="fa-solid fa-location-dot" style={{ color: 'var(--accent-danger)' }}></i> Registro de fallas ({filteredFaultPoints.length})
           </div>
           <button 
             className={`btn ${isAddPointMode ? 'btn-active-mode' : 'btn-cyan'}`} 
@@ -557,14 +564,17 @@ export default function Sidebar({
               onEdit={onEditPoint}
               onDelete={onDeletePoint}
               onRelocate={onRelocatePoint}
+              onRowClick={onFlyToPoint}
             />
           </div>
         </div>
+        </details>
 
-        {/* Tarjeta 5: Exportar Análisis a Excel y PDF */}
-        <div className="card">
+        <details className="sidebar-section" open>
+          <summary><span><i className="fa-solid fa-file-export"></i> 4. Exportar reportes</span><i className="fa-solid fa-chevron-down section-chevron"></i></summary>
+        <div className="section-block">
           <div className="card-title">
-            <i className="fa-solid fa-file-export" style={{ color: '#2e7d32' }}></i> 5. Exportar Reportes (Excel / PDF)
+            <i className="fa-solid fa-file-export" style={{ color: '#2e7d32' }}></i> Exportar reportes
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
             <button 
@@ -592,22 +602,7 @@ export default function Sidebar({
             </button>
           </div>
         </div>
-
-        {/* Tarjeta 6: Visor / Modo Presentación Ejecutiva */}
-        <div className="card">
-          <div className="card-title">
-            <i className="fa-solid fa-desktop" style={{ color: '#ab47bc' }}></i> 6. Visor Modo Presentación
-          </div>
-          <p style={{ fontSize: '10.5px', color: 'var(--text-muted)', marginBottom: '8px' }}>
-            Oculta controles de edición para exponer el mapa y tabla en pantalla completa durante reuniones.
-          </p>
-          <button 
-            className="btn btn-purple" 
-            onClick={onTogglePresentationMode}
-          >
-            <i className="fa-solid fa-desktop"></i> 📺 Activar Modo Presentación (Solo Lectura)
-          </button>
-        </div>
+        </details>
       </div>
     </div>
   );
