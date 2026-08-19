@@ -2,7 +2,7 @@
 
 import FaultTable from './FaultTable';
 
-export default function PresentationTablePanel({ points, onRowClick, onExportExcel, onExportPdf }) {
+export default function PresentationTablePanel({ points, onRowClick, onExportExcel, onExportPdf, onFullViewChange }) {
   const count = points ? points.length : 0;
   
   return (
@@ -37,6 +37,7 @@ export default function PresentationTablePanel({ points, onRowClick, onExportExc
           points={points} 
           showActions={false} 
           onRowClick={onRowClick} 
+          onFullViewChange={onFullViewChange}
         />
       </div>
     </div>

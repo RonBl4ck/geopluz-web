@@ -5,7 +5,7 @@ import FaultTable from './FaultTable';
 import SearchableSedSelect, { sortSedIds } from './SearchableSedSelect';
 import { CIRCUIT_STATUSES } from '@/lib/circuitAnalysis';
 
-const CABLE_COLORS = ['#e53935', '#fb8c00', '#fdd835', '#43a047', '#00acc1', '#8e24aa', '#546e7a'];
+const CABLE_COLORS = ['#e53935', '#d81b60', '#fb8c00', '#fdd835', '#43a047', '#00acc1', '#1e88e5', '#8e24aa', '#546e7a'];
 
 export default function Sidebar({
   seds,
@@ -49,7 +49,8 @@ export default function Sidebar({
   onEditPoint,
   onDeletePoint,
   onRelocatePoint,
-  onFlyToPoint
+  onFlyToPoint,
+  onFaultTableExpanded
 }) {
   const jsonInputRef = useRef(null);
   const excelInputRef = useRef(null);
@@ -565,6 +566,7 @@ export default function Sidebar({
               onDelete={onDeletePoint}
               onRelocate={onRelocatePoint}
               onRowClick={onFlyToPoint}
+              onFullViewChange={onFaultTableExpanded}
             />
           </div>
         </div>

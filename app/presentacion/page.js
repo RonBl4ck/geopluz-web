@@ -25,13 +25,19 @@ export default function PresentacionPage() {
   const [currentLlaveId, setCurrentLlaveId] = useState('');
 
   // Estado UI
+  const [currentTheme, setCurrentTheme] = useState('light');
   const [currentMapStyle, setCurrentMapStyle] = useState('clean');
+  const [isFaultTableExpanded, setIsFaultTableExpanded] = useState(false);
   
   const mapRef = useRef(null);
 
   useEffect(() => {
     loadData();
   }, []);
+
+  useEffect(() => {
+    document.body.classList.toggle('dark-theme', currentTheme === 'dark');
+  }, [currentTheme]);
 
   // Carga de Datos desde Supabase
   async function loadData() {
@@ -124,7 +130,7 @@ export default function PresentacionPage() {
 
   function handleFlyToPoint(point) {
     if (mapRef.current && point.coords) {
-      mapRef.current.flyToPoint(point.coords, 18);
+      mapRef.current.focusFailure(point.coords);
     }
   }
 
@@ -182,7 +188,7 @@ export default function PresentacionPage() {
       <div className="map-container">
         <MapViewer
           ref={mapRef}
-          currentTheme="dark"
+          currentTheme={currentTheme}
           currentMapStyle={currentMapStyle}
           circuitId={`${currentSedId}:${currentLlaveId}`}
           llaveData={currentLlaveData}
@@ -198,6 +204,7 @@ export default function PresentacionPage() {
           onMapClick={() => {}}
           onSedDragEnd={() => {}}
           onPointClick={(idx) => handleFlyToPoint(filteredPoints.find(p => p.localNumber - 1 === idx))}
+          hideOverlays={isFaultTableExpanded}
         />
       </div>
       
@@ -218,9 +225,11 @@ export default function PresentacionPage() {
         onSelectLlave={(llaveId) => setCurrentLlaveId(llaveId)}
         onSelectCircuit={(sedId, llaveId) => { setCurrentSedId(sedId); setCurrentLlaveId(llaveId); }}
         currentMapStyle={currentMapStyle}
+        currentTheme={currentTheme}
         onPrevSed={() => navigateSed(-1)}
         onNextSed={() => navigateSed(1)}
         onToggleMapStyle={() => setCurrentMapStyle(s => s === 'clean' ? 'detailed' : 'clean')}
+        onToggleTheme={() => setCurrentTheme(theme => theme === 'light' ? 'dark' : 'light')}
         onEnterEditMode={() => { window.location.href = '/'; }}
       />
       <PresentationTablePanel
@@ -228,6 +237,7 @@ export default function PresentacionPage() {
         onRowClick={handleFlyToPoint}
         onExportExcel={handleExportExcel}
         onExportPdf={handleExportPdf}
+        onFullViewChange={setIsFaultTableExpanded}
       />
     </>
   );

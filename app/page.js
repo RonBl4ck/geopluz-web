@@ -41,6 +41,7 @@ export default function Page() {
   const [relocatingPointIndex, setRelocatingPointIndex] = useState(null);
   const [isSegmentSelectionMode, setIsSegmentSelectionMode] = useState(false);
   const [selectedLineIds, setSelectedLineIds] = useState([]);
+  const [isFaultTableExpanded, setIsFaultTableExpanded] = useState(false);
 
   // Estado del Formulario
   const [isFormOpen, setIsFormOpen] = useState(false);
@@ -54,6 +55,10 @@ export default function Page() {
   useEffect(() => {
     loadData();
   }, []);
+
+  useEffect(() => {
+    document.body.classList.toggle('dark-theme', currentTheme === 'dark');
+  }, [currentTheme]);
 
   // Carga de Datos desde IndexedDB Caché / Supabase
   async function loadData() {
@@ -986,7 +991,7 @@ export default function Page() {
 
   function handleFlyToPoint(point) {
     if (mapRef.current && point.coords) {
-      mapRef.current.flyToPoint(point.coords, 18);
+      mapRef.current.focusFailure(point.coords);
     }
   }
 
@@ -1193,7 +1198,8 @@ export default function Page() {
           onEditPoint={(idx) => { setEditingPointIndex(idx); setIsFormOpen(true); }}
           onDeletePoint={handleDeletePoint}
           onRelocatePoint={handleRelocatePoint}
-          onFlyToPoint={(point) => mapRef.current?.flyToPoint?.(point.coords, 18, { accountForSidebar: true })}
+          onFlyToPoint={(point) => mapRef.current?.focusFailure?.(point.coords)}
+          onFaultTableExpanded={setIsFaultTableExpanded}
         />
       )}
       
@@ -1218,6 +1224,7 @@ export default function Page() {
           onMapClick={handleMapClick}
           onSedDragEnd={handleSedDragEnd}
           onPointClick={(idx) => { setEditingPointIndex(idx); setIsFormOpen(true); }}
+          hideOverlays={isFaultTableExpanded}
         />
       </div>
       
@@ -1235,9 +1242,11 @@ export default function Page() {
             onSelectLlave={(llaveId) => setCurrentLlaveId(llaveId)}
             onSelectCircuit={(sedId, llaveId) => { setCurrentSedId(sedId); setCurrentLlaveId(llaveId); }}
             currentMapStyle={currentMapStyle}
+            currentTheme={currentTheme}
             onPrevSed={() => navigateSed(-1)}
             onNextSed={() => navigateSed(1)}
             onToggleMapStyle={() => setCurrentMapStyle(s => s === 'clean' ? 'detailed' : 'clean')}
+            onToggleTheme={() => setCurrentTheme(theme => theme === 'light' ? 'dark' : 'light')}
             onEnterEditMode={handleEnterEditMode}
           />
           <PresentationTablePanel
@@ -1245,6 +1254,7 @@ export default function Page() {
             onRowClick={handleFlyToPoint}
             onExportExcel={handleExportExcel}
             onExportPdf={handleExportPdf}
+            onFullViewChange={setIsFaultTableExpanded}
           />
         </>
       )}

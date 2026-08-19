@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { getCauseCategory } from '@/lib/constants';
 
 function CauseBadge({ value }) {
@@ -9,9 +10,23 @@ function CauseBadge({ value }) {
   return <span className="cause-badge" style={{ backgroundColor: category.color, color: category.textColor || '#fff' }}>{value}</span>;
 }
 
-export default function FaultTable({ points = [], showActions = false, onEdit, onDelete, onRelocate, onRowClick, className = '' }) {
+export default function FaultTable({ points = [], showActions = false, onEdit, onDelete, onRelocate, onRowClick, onFullViewChange, className = '' }) {
   const [selectedGallery, setSelectedGallery] = useState(null);
   const [showFullView, setShowFullView] = useState(false);
+
+  useEffect(() => {
+    onFullViewChange?.(showFullView);
+    return () => onFullViewChange?.(false);
+  }, [showFullView, onFullViewChange]);
+
+  useEffect(() => {
+    if (!showFullView) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') setShowFullView(false);
+    };
+    document.addEventListener('keydown', closeOnEscape);
+    return () => document.removeEventListener('keydown', closeOnEscape);
+  }, [showFullView]);
 
   function renderActions(pt, idx, hasCoords) {
     if (!showActions) return null;
@@ -56,7 +71,7 @@ export default function FaultTable({ points = [], showActions = false, onEdit, o
       <tbody>{points.length ? renderRows(false) : <tr><td colSpan={showActions ? 6 : 5} className="empty-table">No hay registros marcados.</td></tr>}</tbody>
     </table>
 
-    {showFullView && <div className="modal-backdrop active fault-full-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setShowFullView(false)}>
+    {showFullView && typeof document !== 'undefined' && createPortal(<div className="modal-backdrop active fault-full-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setShowFullView(false)}>
       <div className="fault-full-modal">
         <div className="modal-heading"><div><h3>Registro de fallas</h3><span>{points.length} registros · información completa</span></div><button className="icon-button" onClick={() => setShowFullView(false)} title="Cerrar"><i className="fa-solid fa-xmark"></i></button></div>
         <div className="fault-full-table-wrap"><table className="points-table points-table-full">
@@ -64,7 +79,7 @@ export default function FaultTable({ points = [], showActions = false, onEdit, o
           <tbody>{renderRows(true)}</tbody>
         </table></div>
       </div>
-    </div>}
+    </div>, document.body)}
 
     {selectedGallery && <div className="modal-backdrop active" style={{ zIndex: 10005 }}>
       <div className="point-form-modal evidence-modal">

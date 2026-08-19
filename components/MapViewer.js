@@ -23,7 +23,8 @@ const MapViewer = forwardRef(({
   onMapClick,
   onSedDragEnd,
   onPointClick,
-  onLineClick
+  onLineClick,
+  hideOverlays = false
 }, ref) => {
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
@@ -38,6 +39,7 @@ const MapViewer = forwardRef(({
   const [sedsMasterDB, setSedsMasterDB] = useState({});
   const [mapViewport, setMapViewport] = useState({ bounds: null, zoom: MAP_DEFAULT_ZOOM });
   const [showLegend, setShowLegend] = useState(true);
+  const [zoomControlBottom, setZoomControlBottom] = useState(10);
   const faultCauseCounts = useMemo(() => {
     const counts = Object.fromEntries(FAULT_CAUSES.map(cause => [cause.id, 0]));
     counts[DEFAULT_CAUSE_COLOR.id] = 0;
@@ -63,21 +65,36 @@ const MapViewer = forwardRef(({
   // Guardamos L en una ref para acceso posterior
   const LRef = useRef(null);
 
+  const focusFailure = useCallback((coords, preferredZoom = 19) => {
+    const map = mapInstanceRef.current;
+    if (!map || !coords) return;
+
+    const target = Array.isArray(coords[0]) ? coords[0] : coords;
+    const targetZoom = Math.max(map.getZoom(), Math.min(preferredZoom, MAP_MAX_ZOOM));
+    const mapRect = map.getContainer().getBoundingClientRect();
+    const sidebar = document.querySelector('#sidebar.sidebar:not(.hidden)');
+    const sidebarRect = sidebar?.getBoundingClientRect();
+    const sidebarOverlap = sidebarRect
+      ? Math.max(0, Math.min(mapRect.right, sidebarRect.right) - Math.max(mapRect.left, sidebarRect.left))
+      : 0;
+
+    map.flyTo(target, targetZoom, { duration: 1.1 });
+    window.setTimeout(() => {
+      // On desktop the map already excludes the sidebar. On overlay layouts, shift by its measured overlap.
+      if (sidebarOverlap > 0) map.panBy([-sidebarOverlap / 2, 0], { animate: true, duration: 0.35 });
+      const marker = pointMarkersRef.current.find(item => item.coords[0] === target[0] && item.coords[1] === target[1]);
+      marker?.marker.openPopup();
+    }, 700);
+  }, []);
+
   useImperativeHandle(ref, () => ({
     flyTo: (coords, zoom) => {
       if (mapInstanceRef.current) {
         mapInstanceRef.current.flyTo(coords, zoom, { duration: 1.5 });
       }
     },
-    flyToPoint: (coords, zoom = 18) => {
-      if (!mapInstanceRef.current || !coords) return;
-      const target = Array.isArray(coords[0]) ? coords[0] : coords;
-      mapInstanceRef.current.flyTo(target, zoom, { duration: 1.1 });
-      window.setTimeout(() => {
-        const marker = pointMarkersRef.current.find(item => item.coords[0] === target[0] && item.coords[1] === target[1]);
-        marker?.marker.openPopup();
-      }, 700);
-    },
+    focusFailure,
+    flyToPoint: focusFailure,
     invalidateSize: () => {
       if (mapInstanceRef.current) {
         mapInstanceRef.current.invalidateSize();
@@ -88,7 +105,36 @@ const MapViewer = forwardRef(({
         mapInstanceRef.current.fitBounds(bounds, { padding: [50, 50] });
       }
     }
-  }));
+  }), [focusFailure]);
+
+  useEffect(() => {
+    if (!isPresentationMode || !mapRef.current) {
+      setZoomControlBottom(10);
+      return undefined;
+    }
+
+    const mapElement = mapRef.current;
+    const panel = document.querySelector('.presentation-table-panel');
+    if (!panel) return undefined;
+
+    const updateZoomPosition = () => {
+      const mapRect = mapElement.getBoundingClientRect();
+      const panelRect = panel.getBoundingClientRect();
+      const panelIsVisible = panelRect.width > 0 && panelRect.height > 0;
+      setZoomControlBottom(panelIsVisible ? Math.max(10, mapRect.bottom - panelRect.top + 10) : 10);
+    };
+
+    const resizeObserver = new ResizeObserver(updateZoomPosition);
+    resizeObserver.observe(mapElement);
+    resizeObserver.observe(panel);
+    window.addEventListener('resize', updateZoomPosition);
+    requestAnimationFrame(updateZoomPosition);
+
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener('resize', updateZoomPosition);
+    };
+  }, [isPresentationMode, faultPoints?.length]);
 
   // Inicializar mapa
   useEffect(() => {
@@ -423,10 +469,10 @@ const MapViewer = forwardRef(({
   }, [isAddPointMode, isRelocating]);
 
   return (
-    <div className={`map-viewer ${isPresentationMode ? 'is-presentation' : 'is-editing'}`} style={{ position: 'relative', width: '100%', height: '100%' }}>
+    <div className={`map-viewer ${isPresentationMode ? 'is-presentation' : 'is-editing'}`} style={{ position: 'relative', width: '100%', height: '100%', '--zoom-control-bottom': `${zoomControlBottom}px` }}>
       <div id="map" ref={mapRef} style={{ width: '100%', height: '100%' }}></div>
 
-      {circuitNote && (
+      {!hideOverlays && circuitNote && (
         <div style={{
           position: 'absolute',
           top: isPresentationMode ? '78px' : '14px',
@@ -448,7 +494,7 @@ const MapViewer = forwardRef(({
         </div>
       )}
 
-      {isSegmentSelectionMode && (
+      {!hideOverlays && isSegmentSelectionMode && (
         <div style={{
           position: 'absolute',
           top: isPresentationMode ? (circuitNote ? '180px' : '78px') : (circuitNote ? '120px' : '14px'),
@@ -467,7 +513,7 @@ const MapViewer = forwardRef(({
         </div>
       )}
 
-      {cableGroups.length > 0 && (
+      {!hideOverlays && cableGroups.length > 0 && (
         <div style={{
           position: 'absolute',
           top: isPresentationMode ? '78px' : (circuitNote ? '120px' : '14px'),
@@ -489,7 +535,7 @@ const MapViewer = forwardRef(({
       )}
 
       {/* Leyenda de Causas de Falla */}
-      <div className="map-legend-container" style={{
+      {!hideOverlays && <div className="map-legend-container" style={{
         position: 'absolute',
         bottom: '24px',
         left: '12px',
@@ -558,7 +604,7 @@ const MapViewer = forwardRef(({
             </div>
           </div>
         )}
-      </div>
+      </div>}
     </div>
   );
 

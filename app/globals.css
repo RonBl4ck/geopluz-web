@@ -535,15 +535,31 @@ select.input-control option {
 .evidence-item span { display: block; padding: 6px; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* === CIRCUIT CONTROLS === */
-.cable-color-picker { display: grid; grid-template-columns: repeat(7, 28px); gap: 7px; align-items: center; }
+.cable-color-picker { display: grid; grid-template-columns: repeat(9, 28px); gap: 7px; align-items: center; }
 .cable-color-picker button { width: 28px; height: 28px; border: 2px solid transparent; border-radius: 4px; cursor: pointer; color: transparent; }
 .cable-color-picker button.active { border-color: var(--text-main); color: #fff; outline: 1px solid var(--bg-secondary); outline-offset: -3px; }
 .circuit-status-chip { margin-left: 8px; display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--status-color); color: var(--status-color); background: color-mix(in srgb, var(--status-color) 13%, var(--bg-secondary)); font-size: 10px; font-weight: 800; }
 .pres-table-title { font-size: 13px; color: var(--text-main); }
 .pres-table-actions { display: flex; align-items: center; gap: 6px; }
-.map-viewer.is-presentation .leaflet-bottom.leaflet-right { bottom: 294px; right: 8px; z-index: 10010; }
+.map-viewer .leaflet-bottom.leaflet-right { bottom: var(--zoom-control-bottom, 10px); right: 8px; z-index: 10010; transition: bottom .18s ease; }
 .map-legend-container b { min-width: 18px; text-align: right; color: var(--text-main); }
 .sed-substation-icon.is-readonly { cursor: default; box-shadow: none; }
+.hud-brand, .hud-context, .hud-actions { display: flex; align-items: center; gap: 8px; }
+.hud-brand img { height: 22px; object-fit: contain; }
+.hud-context { gap: 10px; }
+.hud-title select, .hud-search select { background: var(--bg-secondary); border: 1px solid var(--accent-cyan); border-radius: 4px; color: var(--text-main); font-size: 10px; padding: 2px 4px; }
+.hud-search { position: relative; min-width: 140px; }
+.hud-search-input { display: flex; align-items: center; gap: 4px; padding: 2px 6px; background: var(--bg-secondary); border: 1px solid var(--accent-cyan); border-radius: 5px; }
+.hud-search-input i { color: var(--accent-cyan); font-size: 10px; }
+.hud-search-input input { width: 125px; border: 0; outline: 0; background: transparent; color: var(--text-main); font-size: 11px; font-weight: 600; }
+.hud-search select { width: 100%; margin-top: 4px; }
+.hud-suggestions { position: absolute; top: calc(100% + 4px); left: 0; min-width: 290px; max-height: 250px; overflow-y: auto; background: var(--bg-secondary); border: 1px solid var(--accent-cyan); border-radius: 5px; z-index: 10005; }
+.hud-suggestions button { display: block; width: 100%; padding: 6px 10px; border: 0; border-bottom: 1px solid var(--border-color); background: transparent; color: var(--text-main); text-align: left; font-size: 11px; cursor: pointer; }
+.hud-suggestions button:hover, .hud-suggestions button.active { background: rgba(0, 119, 194, .1); color: var(--accent-cyan); }
+.hud-suggestions button span { margin-left: 6px; padding: 1px 5px; border-radius: 8px; color: #fff; font-size: 9px; }
+.hud-suggestions > div { padding: 8px 10px; color: var(--text-muted); font-size: 11px; }
+.hud-edit-btn { background: rgba(255, 171, 0, .15); border-color: #ffab00; color: #b86100; }
+body.dark-theme .hud-edit-btn { color: #ffab00; }
 
 @media (max-width: 1100px) {
   #sidebar, .sidebar { width: 400px; min-width: 360px; }
@@ -565,10 +581,11 @@ select.input-control option {
   .presentation-hud .hud-btn span { display: none; }
   .presentation-hud .hud-title { white-space: normal; }
   .presentation-hud .hud-title + div { flex: 1; min-width: 180px; }
-  .map-viewer.is-presentation .leaflet-bottom.leaflet-right { bottom: 300px; }
   .map-viewer.is-presentation .map-legend-container { bottom: 330px !important; max-height: calc(100vh - 445px); overflow-y: auto; }
   .pres-table-header { align-items: flex-start; }
   .pres-table-actions { margin-left: auto; }
+  .cable-color-picker { grid-template-columns: repeat(9, minmax(20px, 1fr)); gap: 5px; }
+  .cable-color-picker button { width: 100%; }
 }
 
 /* Leaflet required import */
