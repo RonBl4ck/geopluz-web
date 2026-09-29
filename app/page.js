@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useTransition } from 'react';
 import dynamic from 'next/dynamic';
 import * as XLSX from 'xlsx';
 import Sidebar from '@/components/Sidebar';
@@ -8,18 +8,110 @@ import FaultForm from '@/components/FaultForm';
 import PresentationHUD from '@/components/PresentationHUD';
 import PresentationTablePanel from '@/components/PresentationTablePanel';
 import TicketConflictModal from '@/components/TicketConflictModal';
-import { sortSedIds } from '@/components/SearchableSedSelect';
+import DataSourceBadge from '@/components/DataSourceBadge';
+import { resolvePresentationLlaveSelection, resolvePresentationSedSelection, sortLlaveIds, sortSedIds } from '@/lib/navigationSort';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
+import { fetchAllSupabaseRows } from '@/lib/supabasePagination';
 import { exportExcelBySed } from '@/lib/excelUtils';
 import { exportPdfReport } from '@/lib/pdfUtils';
-import { getCachedSeds, setCachedSeds } from '@/lib/dbCache';
-import { isSedMatch, isLlaveMatch } from '@/lib/sedUtils';
-import { CIRCUIT_STATUSES, hydrateLlave, serializeLlaveLines } from '@/lib/circuitAnalysis';
+import { buildReportModel } from '@/lib/reportModel';
+import { clearActiveLocalProject, clearExpectedLocalProject, getActiveLocalProject, getActiveLocalProjectState, getCachedSeds, getExpectedLocalProject, getLocalProject, invalidateSedsCache, listLocalProjects, listLocalWorkProjectConfigs, markLocalProjectExpected, removeLocalProject, removeLocalWorkProjectConfig, saveLocalWorkProjectConfig, setActiveLocalProject, setCachedSeds } from '@/lib/dbCache';
+import { buildSedOverviewLlaves, filterFaultsForCircuitView } from '@/lib/sedOverview';
+import { analyzeCircuit, analyzeCircuitPhase1, CIRCUIT_STATUSES, hydrateLlave, serializeLlaveLines } from '@/lib/circuitAnalysis';
+import { applyAnalyticalFaultCoordinates, buildAnalysisSegmentFaultView, resolveAnalysisSegment } from '@/lib/analysisSegments';
+import { buildCircuitTopology } from '@/lib/circuitTopology';
+import { GEOPLUZ_PROJECT_FORMAT, parseProjectJson } from '@/lib/projectFormat';
+import { createProjectDocument, projectToInternalModel } from '@/lib/projectMappers';
+import { assertProjectReadyForDownload, validateProject } from '@/lib/projectValidation';
+import { createSupabaseProjectRepository, getMainDatabaseState } from '@/lib/projectImport';
+import { createSupabaseLifecycleRepository, deleteCurrentProject, discardStaging, finalizeStagedProject, stageProject } from '@/lib/projectStaging';
+import { deduplicateSelectedFaults, filterFaultsByPeriods, formatPeriodLabel, formatSelectedPeriodLabel, resolveActivePeriodSelection, summarizePeriods, UNASSIGNED_PERIOD_KEY } from '@/lib/faultPeriods';
+import { derivePeriodKeyFromStartTime, georeferenceMonthlyFaultRows, normalizeFaultCause, readCallCountFromRow } from '@/lib/monthlyFaultImport';
+import { buildSedPeriodMetrics, reconcileSedPeriodMetrics, sortSedPeriodMetrics } from '@/lib/sedMetrics';
+import { buildSedPath, buildSedUrl, normalizeSedIdParam, replaceBrowserPath, resolveSedDeepLink } from '@/lib/sedLinks';
+import { normalizeSedId } from '@/lib/sedUtils';
+import { buildManualEdgeCatalog, findUniqueAnalyticalEdgePath, resolveManualGroupEdgeRefs, splitEdgeIdsIntoConnectedComponents } from '@/lib/manualAnalysisUnits';
+import { buildEconomicAnalysisInput } from '@/lib/economicAnalysisInput';
+import { GEOPLUZ_PROJECT_CONFIG_FORMAT, GEOPLUZ_PROJECT_CONFIG_VERSION, validateWorkProjectConfig } from '@/lib/workProjectConfig';
+import {
+  COORD_SOURCE,
+  coordinatePairsEqual,
+  formatGeoreferenceSummary,
+  georeferenceFaultBatch,
+  getCoordinatePair,
+  isValidCoordinatePair,
+  markCoordinatesManual,
+  normalizeSuministro
+} from '@/lib/faultGeolocation';
 
 // MapViewer importado dinámicamente para evitar SSR
 const MapViewer = dynamic(() => import('@/components/MapViewer'), { ssr: false });
 
-export default function Page() {
+function mapSupabaseFaultRows(fallasData = []) {
+  return fallasData.map((falla, index) => ({
+    id: falla.id,
+    number: index + 1,
+    coords: isValidCoordinatePair(falla) ? [falla.latitud, falla.longitud] : null,
+    ticket: falla.ticket || '',
+    horaInicio: falla.hora_inicio || '',
+    zona: falla.zona || '',
+    set: falla.set_alimentador ? falla.set_alimentador.split('/')[0]?.trim() : '',
+    alimentador: falla.set_alimentador ? falla.set_alimentador.split('/')[1]?.trim() : '',
+    setAlimentador: falla.set_alimentador || '',
+    nota: falla.nota || '',
+    odm: falla.odm || '',
+    suministro: falla.suministro || '',
+    sedLlave: falla.sed_llave || '',
+    sed: falla.sed_id || '',
+    llaveSistema: falla.llave_code || '',
+    llaveCampo: `${falla.llave_code || ''} (Campo)`,
+    falla: falla.falla_real || '',
+    causa: falla.causa || '',
+    linkCroquis: falla.link_croquis || '',
+    fotos: falla.fotos || [],
+    coordSource: falla.coord_source || null,
+    coordLookupSuministro: falla.coord_lookup_suministro || null,
+    createdAt: falla.created_at || null,
+    periodKey: derivePeriodKeyFromStartTime(falla.hora_inicio) || falla.period_key || null,
+    sourceRecordId: falla.source_record_id || null,
+    callCount: falla.call_count ?? null
+  }));
+}
+
+function mapSupabaseRowsToProjectState(sedsData = [], llavesData = [], fallasData = []) {
+  const database = {};
+  sedsData.forEach(sed => {
+    database[sed.id] = {
+      id: sed.id,
+      name: sed.name,
+      sedCoord: sed.sed_coord,
+      createdAt: sed.created_at || null,
+      llaves: {}
+    };
+  });
+  llavesData.forEach(llave => {
+    if (database[llave.sed_id]) database[llave.sed_id].llaves[llave.llave_code] = hydrateLlave(llave);
+  });
+  const faults = mapSupabaseFaultRows(fallasData);
+  return { database, faults };
+}
+
+async function downloadProjectFile(project) {
+  await assertProjectReadyForDownload(project);
+  const blob = new Blob([JSON.stringify(project)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  const safeName = String(project.project.name || 'geopluz-proyecto').replace(/[^a-z0-9_-]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
+  link.href = url;
+  link.download = `${safeName || 'geopluz-proyecto'}.geopluz.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+export default function Page({ requestedSedId = '', isSedRoute = false }) {
+  const normalizedRequestedSedId = normalizeSedIdParam(requestedSedId);
   // Estado de Datos
   const [localDatabase, setLocalDatabase] = useState({});
   const [numberedPointsList, setNumberedPointsList] = useState([]);
@@ -32,51 +124,194 @@ export default function Page() {
   // Estado de Navegación
   const [currentSedId, setCurrentSedId] = useState('');
   const [currentLlaveId, setCurrentLlaveId] = useState('');
+  const [showFullSedView, setShowFullSedView] = useState(true);
 
   // Estado UI
-  const [currentTheme, setCurrentTheme] = useState('light');
-  const [currentMapStyle, setCurrentMapStyle] = useState('clean');
   const [isAddPointMode, setIsAddPointMode] = useState(false);
   const [isPresentationMode, setIsPresentationMode] = useState(true);
   const [relocatingPointIndex, setRelocatingPointIndex] = useState(null);
   const [isSegmentSelectionMode, setIsSegmentSelectionMode] = useState(false);
   const [selectedLineIds, setSelectedLineIds] = useState([]);
-  const [isFaultTableExpanded, setIsFaultTableExpanded] = useState(false);
+  const [selectedManualEdgeRefs, setSelectedManualEdgeRefs] = useState([]);
+  const [manualSelectionTopology, setManualSelectionTopology] = useState(null);
+  const [manualPathStartEdgeId, setManualPathStartEdgeId] = useState(null);
+  const [manualPathSelectionComplete, setManualPathSelectionComplete] = useState(false);
+  const [manualSelectionMessage, setManualSelectionMessage] = useState('');
+  const [circuitPhase1Analysis, setCircuitPhase1Analysis] = useState(null);
+  const [analysisCircuitKey, setAnalysisCircuitKey] = useState('');
+  const [analysisPeriodSignature, setAnalysisPeriodSignature] = useState('');
+  const [selectedAnalysisSegmentId, setSelectedAnalysisSegmentId] = useState(null);
+  const [filterByAnalysisSegment, setFilterByAnalysisSegment] = useState(false);
+  const [deletingPointId, setDeletingPointId] = useState(null);
+  const [activeMajorOverlays, setActiveMajorOverlays] = useState(() => new Set());
+  const [dataSource, setDataSource] = useState({ kind: 'SUPABASE', readOnly: false, projectId: 'geopluz-main', projectName: 'Base Principal GEOPLUZ' });
+  const [localProjectCatalog, setLocalProjectCatalog] = useState([]);
+  const [faultPeriods, setFaultPeriods] = useState([]);
+  const [selectedPeriodKeys, setSelectedPeriodKeys] = useState([]);
+  const [periodSupport, setPeriodSupport] = useState(false);
+  const [sedMonthlyMetrics, setSedMonthlyMetrics] = useState([]);
+  const [circuitMonthlyMetrics, setCircuitMonthlyMetrics] = useState([]);
+  const [circuitCompensationSupport, setCircuitCompensationSupport] = useState(false);
+  const [workProjects, setWorkProjects] = useState([]);
+  const [activeWorkSedIds, setActiveWorkSedIds] = useState([]);
+  const [mainDataLoaded, setMainDataLoaded] = useState(false);
+  const [deepLinkResolved, setDeepLinkResolved] = useState(!isSedRoute);
+  const [deepLinkNotice, setDeepLinkNotice] = useState('');
+  const [sedLinkFeedback, setSedLinkFeedback] = useState('');
+  const [navigationLabel, setNavigationLabel] = useState('');
+  const [isAnalyzingCircuit, setIsAnalyzingCircuit] = useState(false);
+  const [reportExportStatus, setReportExportStatus] = useState('');
+  const reportExportBusyRef = useRef(false);
+  const reportEconomicRef = useRef(null);
+  const handleReportEconomicChange = useCallback(value => { reportEconomicRef.current = value; }, []);
+  const [isNavigationPending, startNavigationTransition] = useTransition();
+  const periodLoadRequestRef = useRef(0);
+  const initializationStartedRef = useRef(false);
+  const copyFeedbackTimeoutRef = useRef(null);
+  const selectedPeriodKeysRef = useRef([]);
+  const hasManualPeriodSelectionRef = useRef(false);
 
   // Estado del Formulario
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingPointIndex, setEditingPointIndex] = useState(null);
 
-  // El acceso a esta pantalla exige una sesión Supabase válida mediante AuthGate.
-  const isEditable = true;
+  // La copia local editable nunca sincroniza escrituras con Supabase.
+  const isSupabaseSource = dataSource.kind === 'SUPABASE';
+  const isLocalWorkspace = dataSource.kind === 'LOCAL_WORKSPACE';
+  const isEditable = isSupabaseSource || isLocalWorkspace;
   
   const mapRef = useRef(null);
 
+  const runNavigationTransition = useCallback((label, update) => {
+    setNavigationLabel(label);
+    startNavigationTransition(update);
+  }, []);
+
+  const updateSelectedPeriodKeys = useCallback((keys, { manual = false } = {}) => {
+    const normalized = [...new Set(keys || [])];
+    selectedPeriodKeysRef.current = normalized;
+    if (manual) hasManualPeriodSelectionRef.current = true;
+    setSelectedPeriodKeys(normalized);
+  }, []);
+
+  const setMajorOverlayOpen = useCallback((overlayId, isOpen) => {
+    setActiveMajorOverlays(current => {
+      const alreadyOpen = current.has(overlayId);
+      if (alreadyOpen === isOpen) return current;
+      const next = new Set(current);
+      if (isOpen) next.add(overlayId);
+      else next.delete(overlayId);
+      return next;
+    });
+  }, []);
+
+  const isMajorOverlayOpen = activeMajorOverlays.size > 0;
+
   useEffect(() => {
-    loadData();
+    setMajorOverlayOpen('fault-form', isFormOpen);
+  }, [isFormOpen, setMajorOverlayOpen]);
+
+  useEffect(() => {
+    setMajorOverlayOpen('ticket-conflicts', isConflictModalOpen);
+  }, [isConflictModalOpen, setMajorOverlayOpen]);
+
+  useEffect(() => {
+    if (initializationStartedRef.current) return;
+    initializationStartedRef.current = true;
+    initializeData();
   }, []);
 
   useEffect(() => {
-    document.body.classList.toggle('dark-theme', currentTheme === 'dark');
-  }, [currentTheme]);
+    document.body.classList.remove('dark-theme');
+  }, []);
+
+  async function initializeData() {
+    if (isSedRoute) {
+      await loadSupabaseData();
+      return;
+    }
+    const expectedLocalProject = getExpectedLocalProject();
+    const [activeLocalProject, catalog, localWorkProjects] = await Promise.all([getActiveLocalProjectState(), listLocalProjects(), listLocalWorkProjectConfigs()]);
+    setLocalProjectCatalog(catalog);
+    setWorkProjects(localWorkProjects);
+    if (activeLocalProject?.project) {
+      const validation = await validateProject(activeLocalProject.project);
+      if (validation.valid) {
+        const editable = activeLocalProject.editable || Boolean(expectedLocalProject?.editable);
+        await setActiveLocalProject(activeLocalProject.project, { editable });
+        setLocalProjectCatalog(await listLocalProjects());
+        applyLocalProject(activeLocalProject.project, { editable });
+        return;
+      }
+      await clearActiveLocalProject();
+    }
+    if (expectedLocalProject) {
+      setDataSource({ kind: 'LOCAL_PROJECT', readOnly: true, projectId: expectedLocalProject.projectId, projectName: `${expectedLocalProject.projectName} (no disponible)` });
+      return;
+    }
+    await loadSupabaseData();
+  }
 
   // Carga de Datos desde IndexedDB Caché / Supabase
-  async function loadData() {
-    // 1. Intentar cargar SEDS & Llaves desde caché IndexedDB primero para respuesta instantánea
+  async function fetchSupabaseFaultsForPeriods(periodKeys, supportsPeriods) {
+    if (!supabase) return [];
+    if (!supportsPeriods) {
+      const rows = await fetchAllSupabaseRows((start, end) => supabase.from('fallas').select('*').order('id', { ascending: true }).range(start, end));
+      return mapSupabaseFaultRows(rows);
+    }
+    const monthlyKeys = [...new Set((periodKeys || []).filter(key => key !== UNASSIGNED_PERIOD_KEY))];
+    const requests = [];
+    if (monthlyKeys.length) requests.push(fetchAllSupabaseRows((start, end) => supabase.from('fallas').select('*').in('period_key', monthlyKeys).order('id', { ascending: true }).range(start, end)));
+    if ((periodKeys || []).includes(UNASSIGNED_PERIOD_KEY)) requests.push(fetchAllSupabaseRows((start, end) => supabase.from('fallas').select('*').is('period_key', null).order('id', { ascending: true }).range(start, end)));
+    if (!requests.length) return [];
+    const results = await Promise.all(requests);
+    const rows = results.flat().sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
+    return mapSupabaseFaultRows(rows);
+  }
+
+  async function handleChangeSelectedPeriods(nextPeriodKeys) {
+    const normalized = [...new Set(nextPeriodKeys || [])];
+    updateSelectedPeriodKeys(normalized, { manual: true });
+    if (!isSupabaseSource || !periodSupport) return;
+    const requestId = ++periodLoadRequestRef.current;
     try {
-      const cachedDb = await getCachedSeds();
-      if (cachedDb && Object.keys(cachedDb).length > 0) {
-        setLocalDatabase(cachedDb);
+      const points = await fetchSupabaseFaultsForPeriods(normalized, true);
+      if (requestId === periodLoadRequestRef.current) setNumberedPointsList(points);
+    } catch (error) {
+      if (requestId === periodLoadRequestRef.current) alert(`No se pudieron cargar los periodos seleccionados: ${error?.message || 'error desconocido'}`);
+    }
+  }
+
+  async function loadSupabaseData({ skipCache = false, preservePeriodSelection = false } = {}) {
+    // 1. Intentar cargar SEDS & Llaves desde caché IndexedDB primero para respuesta instantánea
+    if (!skipCache) {
+      try {
+        const cachedDb = await getCachedSeds();
+        if (cachedDb && Object.keys(cachedDb).length > 0) {
+          setLocalDatabase(cachedDb);
+        }
+      } catch (cErr) {
+        console.warn('Error leyendo caché IndexedDB:', cErr);
       }
-    } catch (cErr) {
-      console.warn('Error leyendo caché IndexedDB:', cErr);
     }
 
     if (!isSupabaseConfigured || !supabase) return;
     try {
-      const { data: sedsData, error: sedsError } = await supabase.from('seds').select('*').range(0, 99999);
-      const { data: llavesData } = await supabase.from('llaves').select('*').range(0, 99999);
-      const { data: fallasData } = await supabase.from('fallas').select('*').range(0, 99999);
+      const [
+        { data: sedsData, error: sedsError },
+        { data: llavesData },
+        periodsResult,
+        projectsResult,
+        compensationResult,
+        circuitCompensationResult
+      ] = await Promise.all([
+        supabase.from('seds').select('*').range(0, 99999),
+        supabase.from('llaves').select('*').range(0, 99999),
+        supabase.from('fault_periods').select('period_key, label, start_date, end_date, row_count, created_at').order('period_key', { ascending: false }),
+        supabase.from('geopluz_work_projects').select('id, owner_id, name, description, sed_ids, period_keys, created_at, updated_at').order('updated_at', { ascending: false }),
+        supabase.from('sed_monthly_metrics').select('sed_id, period_key, compensation, created_at, updated_at').order('period_key', { ascending: false }),
+        supabase.from('circuit_monthly_metrics').select('*').order('period_key', { ascending: false })
+      ]);
       
       if (!sedsError && sedsData) {
         const db = {};
@@ -85,6 +320,7 @@ export default function Page() {
             id: sed.id,
             name: sed.name,
             sedCoord: sed.sed_coord,
+            createdAt: sed.created_at || null,
             llaves: {}
           };
         });
@@ -100,93 +336,449 @@ export default function Page() {
         // Guardar la versión actualizada en IndexedDB
         setCachedSeds(db);
         
-        if (fallasData) {
-          // Deduplicar registros de Supabase por Ticket (manteniendo el más reciente o con ID más alto)
-          const uniqueMap = new Map();
-          fallasData.forEach(f => {
-            const key = f.ticket ? String(f.ticket).trim().toLowerCase() : null;
-            if (key) {
-              if (!uniqueMap.has(key)) {
-                uniqueMap.set(key, f);
-              } else {
-                const existing = uniqueMap.get(key);
-                // Conservar el registro con mayor información o ID más reciente
-                if ((!existing.latitud && f.latitud) || (f.id && (!existing.id || f.id > existing.id))) {
-                  uniqueMap.set(key, f);
-                }
-              }
-            } else {
-              uniqueMap.set(`id_${f.id}`, f);
-            }
+        {
+          const supportsPeriods = !periodsResult.error;
+          let onlinePeriods = supportsPeriods ? (periodsResult.data || []).map(period => ({
+            periodKey: period.period_key,
+            label: period.label || formatPeriodLabel(period.period_key),
+            startDate: period.start_date,
+            endDate: period.end_date,
+            rowCount: Number(period.row_count || 0),
+            createdAt: period.created_at
+          })) : [];
+          if (supportsPeriods) {
+            const unassignedResult = await supabase.from('fallas').select('id', { count: 'exact', head: true }).is('period_key', null);
+            if (unassignedResult.error) throw unassignedResult.error;
+            if (Number(unassignedResult.count || 0) > 0) onlinePeriods.push({ periodKey: UNASSIGNED_PERIOD_KEY, label: formatPeriodLabel(UNASSIGNED_PERIOD_KEY), rowCount: Number(unassignedResult.count), legacy: true });
+          }
+          let initialPeriodKeys = resolveActivePeriodSelection(onlinePeriods, selectedPeriodKeysRef.current, {
+            preserveSelection: preservePeriodSelection || hasManualPeriodSelectionRef.current
           });
-
-          const deduplicatedFallas = Array.from(uniqueMap.values());
-          const points = deduplicatedFallas.map((f, i) => ({
-            id: f.id,
-            number: i + 1,
-            coords: (f.latitud && f.longitud) ? [f.latitud, f.longitud] : null,
-            ticket: f.ticket || '',
-            horaInicio: f.hora_inicio || '',
-            zona: f.zona || '',
-            set: f.set_alimentador ? f.set_alimentador.split('/')[0]?.trim() : '',
-            alimentador: f.set_alimentador ? f.set_alimentador.split('/')[1]?.trim() : '',
-            nota: f.nota || '',
-            odm: f.odm || '',
-            suministro: f.suministro || '',
-            sedLlave: f.sed_llave || '',
-            sed: f.sed_id || '',
-            llaveSistema: f.llave_code || '',
-            llaveCampo: `${f.llave_code || ''} (Campo)`,
-            falla: f.falla_real || '',
-            causa: f.causa || '',
-            linkCroquis: f.link_croquis || '',
-            fotos: f.fotos || []
-          }));
+          const points = await fetchSupabaseFaultsForPeriods(initialPeriodKeys, supportsPeriods);
+          if (!supportsPeriods) {
+            onlinePeriods = [{ periodKey: UNASSIGNED_PERIOD_KEY, label: formatPeriodLabel(UNASSIGNED_PERIOD_KEY), rowCount: points.length, legacy: true }];
+            initialPeriodKeys = [UNASSIGNED_PERIOD_KEY];
+          }
           setNumberedPointsList(points);
+          setFaultPeriods(onlinePeriods);
+          updateSelectedPeriodKeys(initialPeriodKeys);
+          setPeriodSupport(supportsPeriods);
+          setSedMonthlyMetrics(!compensationResult.error ? (compensationResult.data || []).map(row => ({
+            sedId: row.sed_id,
+            periodKey: row.period_key,
+            compensation: Number(row.compensation),
+            createdAt: row.created_at,
+            updatedAt: row.updated_at
+          })) : []);
+          setCircuitMonthlyMetrics(!circuitCompensationResult.error ? (circuitCompensationResult.data || []).map(row => ({
+            sedId: row.sed_id,
+            llaveCode: row.llave_code,
+            periodKey: row.period_key,
+            periodEndKey: row.period_end_key || row.period_key,
+            compensation: Number(row.compensation),
+            createdAt: row.created_at,
+            updatedAt: row.updated_at
+          })) : []);
+          setCircuitCompensationSupport(!circuitCompensationResult.error);
+          if (!projectsResult.error) setWorkProjects((projectsResult.data || []).map(project => ({ ...project, format: GEOPLUZ_PROJECT_CONFIG_FORMAT, version: GEOPLUZ_PROJECT_CONFIG_VERSION })));
         }
+        setDataSource({ kind: 'SUPABASE', readOnly: false, projectId: 'geopluz-main', projectName: 'Base Principal GEOPLUZ' });
+        setMainDataLoaded(true);
       }
     } catch (err) {
       console.log('Supabase no disponible, usando caché local:', err.message);
     }
   }
 
-  // Filtrado flexible de Puntos por SED y Llave
-  const getFilteredPoints = useCallback(() => {
-    return numberedPointsList
-      .map((pt, i) => ({ ...pt, originalIndex: i }))
-      .filter(pt => {
-        if (!currentSedId) return true;
-        return isSedMatch(pt.sed, pt.sedLlave, currentSedId) && isLlaveMatch(pt.llaveSistema, pt.sedLlave, currentLlaveId);
-      })
-      .map((pt, i) => ({ ...pt, localNumber: i + 1 }));
-  }, [numberedPointsList, currentSedId, currentLlaveId]);
+  function applyLocalProject(project, { editable = false } = {}) {
+    const model = projectToInternalModel(project);
+    setLocalDatabase(model.localDatabase);
+    setNumberedPointsList(model.numberedPointsList);
+    setDataSource({
+      kind: editable ? 'LOCAL_WORKSPACE' : 'LOCAL_PROJECT',
+      readOnly: !editable,
+      projectId: project.project.id,
+      projectName: project.project.name,
+      sourceKind: project.project.source_kind
+    });
+    setMainDataLoaded(false);
+    setDeepLinkNotice('');
+    if (window.location.pathname.startsWith('/sed/')) replaceBrowserPath('/');
+    const localPeriodCounts = summarizePeriods(model.numberedPointsList);
+    const localPeriods = [...localPeriodCounts.entries()].map(([periodKey, rowCount]) => ({ periodKey, label: formatPeriodLabel(periodKey), rowCount, local: true }));
+    setFaultPeriods(localPeriods);
+    setSedMonthlyMetrics([]);
+    setCircuitMonthlyMetrics([]);
+    setPeriodSupport(false);
+    setIsAddPointMode(false);
+    setRelocatingPointIndex(null);
+    setIsSegmentSelectionMode(false);
+    setSelectedLineIds([]);
+    setSelectedManualEdgeRefs([]);
+    setManualSelectionTopology(null);
+    setManualPathStartEdgeId(null);
+    setManualPathSelectionComplete(false);
+    setManualSelectionMessage('');
+    setEditingPointIndex(null);
+    setIsFormOpen(false);
+    markLocalProjectExpected(project, { editable });
+    const firstSed = Object.keys(model.localDatabase)[0] || '';
+    setCurrentSedId(firstSed);
+    setCurrentLlaveId(firstSed ? Object.keys(model.localDatabase[firstSed]?.llaves || {})[0] || '' : '');
+  }
 
-  const filteredPoints = getFilteredPoints();
+  async function handleOpenLocalProject(project, _validationResult, { editable = false } = {}) {
+    const validation = await validateProject(project);
+    if (!validation.valid) throw new Error('El proyecto dejó de ser válido antes de abrirse.');
+    if (isLocalWorkspace) await persistCurrentLocalWorkspace();
+    const cached = await setActiveLocalProject(project, { editable });
+    applyLocalProject(project, { editable });
+    setLocalProjectCatalog(await listLocalProjects());
+    if (!cached) {
+      alert('El proyecto se abrió localmente, pero el navegador no permitió guardarlo para futuras recargas.');
+    }
+  }
+
+  async function handleGetActiveLocalProject() {
+    const cached = await getActiveLocalProject();
+    if (cached) return cached;
+    return createProjectDocument(localDatabase, numberedPointsList, {
+      projectId: dataSource.projectId,
+      projectName: dataSource.projectName,
+      sourceKind: dataSource.sourceKind || 'LOCAL_PROJECT'
+    });
+  }
+
+  async function persistCurrentLocalWorkspace() {
+    if (!isLocalWorkspace) return null;
+    const project = await createProjectDocument(localDatabase, numberedPointsList, {
+      projectId: dataSource.projectId,
+      projectName: dataSource.projectName,
+      sourceKind: dataSource.sourceKind || 'LOCAL_PROJECT'
+    });
+    const saved = await setActiveLocalProject(project, { editable: true });
+    if (saved) {
+      markLocalProjectExpected(project, { editable: true });
+      setLocalProjectCatalog(await listLocalProjects());
+    }
+    return project;
+  }
+
+  async function handleSwitchLocalProject(projectId, { editable = true } = {}) {
+    if (!projectId || (projectId === dataSource.projectId && editable === isLocalWorkspace)) return;
+    if (isLocalWorkspace) await persistCurrentLocalWorkspace();
+    const project = await getLocalProject(projectId);
+    if (!project) throw new Error('La copia local seleccionada ya no está disponible en este navegador.');
+    const validation = await validateProject(project);
+    if (!validation.valid) throw new Error('La copia local seleccionada no supera la validación del proyecto.');
+    const saved = await setActiveLocalProject(project, { editable });
+    if (!saved) throw new Error('El navegador no pudo activar la copia local seleccionada.');
+    applyLocalProject(project, { editable });
+    setLocalProjectCatalog(await listLocalProjects());
+  }
+
+  async function handleRemoveLocalProject(projectId) {
+    const wasActive = dataSource.projectId === projectId && !isSupabaseSource;
+    if (wasActive && isLocalWorkspace) await persistCurrentLocalWorkspace();
+    const removed = await removeLocalProject(projectId);
+    if (!removed) throw new Error('No se pudo eliminar la copia local del navegador.');
+    setLocalProjectCatalog(await listLocalProjects());
+    if (wasActive) await handleCloseLocalProject({ skipPersist: true });
+  }
+
+  useEffect(() => {
+    if (!isLocalWorkspace) return undefined;
+    const timeoutId = window.setTimeout(async () => {
+      try {
+        await persistCurrentLocalWorkspace();
+      } catch (error) {
+        console.warn('No se pudo guardar la copia editable local:', error?.message || 'Error desconocido');
+      }
+    }, 350);
+    return () => window.clearTimeout(timeoutId);
+  }, [dataSource.projectId, dataSource.projectName, dataSource.sourceKind, isLocalWorkspace, localDatabase, numberedPointsList]);
+
+  async function handleCheckMainDatabase() {
+    if (!isSupabaseConfigured || !supabase) throw new Error('Supabase no está configurado para comprobar la Base Principal.');
+    const { data: { session }, error } = await supabase.auth.getSession();
+    if (error || !session) throw new Error('Tu sesión de Supabase no está disponible. Inicia sesión nuevamente.');
+    return getMainDatabaseState(createSupabaseProjectRepository(supabase));
+  }
+
+  async function handleCloseLocalProject({ skipPersist = false } = {}) {
+    if (dataSource.kind !== 'LOCAL_PROJECT' && dataSource.kind !== 'LOCAL_WORKSPACE') return;
+    if (isLocalWorkspace && !skipPersist) await persistCurrentLocalWorkspace();
+    await clearActiveLocalProject();
+    clearExpectedLocalProject();
+    setLocalDatabase({});
+    setNumberedPointsList([]);
+    setCurrentSedId('');
+    setCurrentLlaveId('');
+    setDataSource({ kind: 'SUPABASE', readOnly: false, projectId: 'geopluz-main', projectName: 'Base Principal GEOPLUZ' });
+    await loadSupabaseData();
+  }
+
+  async function handleDownloadProject() {
+    try {
+      const project = await createProjectDocument(localDatabase, numberedPointsList, {
+        projectId: dataSource.projectId,
+        projectName: dataSource.projectName,
+        sourceKind: dataSource.sourceKind || dataSource.kind
+      });
+      await downloadProjectFile(project);
+    } catch (error) {
+      alert(`No se pudo generar el proyecto: ${error.message}`);
+    }
+  }
+
+  async function requireLifecycleSession() {
+    if (!isSupabaseConfigured || !supabase) throw new Error('Supabase no está configurado.');
+    const { data: { session }, error } = await supabase.auth.getSession();
+    if (error || !session?.user?.id) throw new Error('Tu sesión de Supabase expiró. Inicia sesión nuevamente.');
+    return { session, repository: createSupabaseLifecycleRepository(supabase) };
+  }
+
+  async function handleDownloadMainProject() {
+    const { session } = await requireLifecycleSession();
+    if (!session) return;
+    const [sedsResult, llavesResult, fallasResult] = await Promise.all([
+      supabase.from('seds').select('*').range(0, 99999),
+      supabase.from('llaves').select('*').range(0, 99999),
+      supabase.from('fallas').select('*').range(0, 99999)
+    ]);
+    const error = sedsResult.error || llavesResult.error || fallasResult.error;
+    if (error) throw new Error('No se pudo obtener un snapshot completo de la Base Principal.');
+    const state = mapSupabaseRowsToProjectState(sedsResult.data, llavesResult.data, fallasResult.data);
+    const project = await createProjectDocument(state.database, state.faults, {
+      projectId: 'geopluz-main', projectName: 'Base Principal GEOPLUZ', sourceKind: 'SUPABASE'
+    });
+    await downloadProjectFile(project);
+  }
+
+  async function handleStageProject(project, onProgress) {
+    const validation = await validateProject(project);
+    if (!validation.valid) throw new Error('El proyecto dejó de ser válido antes de cargar staging.');
+    const { session, repository } = await requireLifecycleSession();
+    return stageProject(repository, project, session.user.id, { onProgress });
+  }
+
+  async function handleDiscardStaging(importId) {
+    const { repository } = await requireLifecycleSession();
+    return discardStaging(repository, importId);
+  }
+
+  function countsAreEqual(left, right) {
+    return ['seds', 'llaves', 'fallas'].every(table => left?.[table] === right?.[table]);
+  }
+
+  async function getSupplyMasterCount() {
+    const { count, error } = await supabase.from('suministros_coordenadas').select('*', { count: 'exact', head: true });
+    if (error || !Number.isInteger(count)) throw new Error('No se pudo verificar el maestro de suministros.');
+    return count;
+  }
+
+  async function finishProjectLifecycle(result, successMessage) {
+    await clearActiveLocalProject();
+    clearExpectedLocalProject();
+    await invalidateSedsCache();
+    setLocalDatabase({});
+    setNumberedPointsList([]);
+    setCurrentSedId('');
+    setCurrentLlaveId('');
+    setDataSource({ kind: 'SUPABASE', readOnly: false, projectId: 'geopluz-main', projectName: 'Base Principal GEOPLUZ' });
+    await loadSupabaseData({ skipCache: true, preservePeriodSelection: true });
+    alert(`${successMessage}\n\nSED: ${result.seds}\nCircuitos: ${result.llaves}\nFallas: ${result.fallas}`);
+  }
+
+  async function handleFinalizeProject(importId, displayedCurrentCounts, replacementCounts) {
+    const { repository } = await requireLifecycleSession();
+    const [freshCounts, supplyBefore] = await Promise.all([
+      getMainDatabaseState(createSupabaseProjectRepository(supabase)),
+      getSupplyMasterCount()
+    ]);
+    if (!countsAreEqual(freshCounts, displayedCurrentCounts)) {
+      const error = new Error('Los conteos de la Base Principal cambiaron. Revisa y confirma nuevamente.');
+      error.code = 'CURRENT_COUNTS_CHANGED';
+      error.counts = freshCounts;
+      throw error;
+    }
+    const result = await finalizeStagedProject(repository, importId, freshCounts);
+    const [verified, supplyAfter] = await Promise.all([
+      getMainDatabaseState(createSupabaseProjectRepository(supabase)),
+      getSupplyMasterCount()
+    ]);
+    if (!countsAreEqual(verified, replacementCounts) || supplyAfter !== supplyBefore) {
+      const error = new Error('La RPC finalizó, pero la verificación remota posterior no coincide. No reintentes sin revisar la Base Principal.');
+      error.code = 'POST_FINALIZATION_VERIFICATION_FAILED';
+      error.finalized = true;
+      error.counts = verified;
+      throw error;
+    }
+    const wasImport = freshCounts.isEmpty || result.operation === 'import';
+    await finishProjectLifecycle(result, wasImport ? 'Proyecto importado correctamente.' : 'Proyecto reemplazado correctamente.');
+    return result;
+  }
+
+  async function handleDeleteMainProject(displayedCurrentCounts) {
+    const { repository } = await requireLifecycleSession();
+    const freshCounts = await getMainDatabaseState(createSupabaseProjectRepository(supabase));
+    if (!countsAreEqual(freshCounts, displayedCurrentCounts)) {
+      const error = new Error('Los conteos de la Base Principal cambiaron. Revisa y confirma nuevamente.');
+      error.code = 'CURRENT_COUNTS_CHANGED';
+      error.counts = freshCounts;
+      throw error;
+    }
+    const result = await deleteCurrentProject(repository, freshCounts);
+    const verified = await getMainDatabaseState(createSupabaseProjectRepository(supabase));
+    if (!verified.isEmpty) throw new Error('La verificación remota indica que la Base Principal no quedó vacía.');
+    await finishProjectLifecycle(result, 'Proyecto actual borrado correctamente.');
+    return result;
+  }
+
+  // El matching sigue centralizado en sedUtils. La vista completa omite solo el filtro de llave.
+  const activePeriodKeys = isSupabaseSource
+    ? selectedPeriodKeys
+    : [...summarizePeriods(numberedPointsList).keys()].sort();
+  const periodFilteredPoints = deduplicateSelectedFaults(
+    isSupabaseSource ? filterFaultsByPeriods(numberedPointsList, activePeriodKeys) : numberedPointsList
+  ).faults;
+  const sedFaultRanking = sortSedPeriodMetrics(buildSedPeriodMetrics(localDatabase, periodFilteredPoints, sedMonthlyMetrics, activePeriodKeys), 'faultCount')
+    .filter(item => activeWorkSedIds.length === 0 || activeWorkSedIds.includes(item.sedId))
+    .map((item, index) => ({ ...item, rank: index + 1 }));
+  const selectedSedPeriodSummary = sedFaultRanking.find(item => item.sedId === currentSedId) || null;
+  const selectedSedMetricReconciliation = currentSedId
+    ? reconcileSedPeriodMetrics(localDatabase, periodFilteredPoints, sedMonthlyMetrics, activePeriodKeys, currentSedId)
+    : null;
+  const selectedPeriodLabel = formatSelectedPeriodLabel(activePeriodKeys);
+  const selectedLlavePoints = filterFaultsForCircuitView(periodFilteredPoints, {
+    sedId: currentSedId,
+    llaveId: currentLlaveId,
+    showFullSed: false,
+    knownLlaveIds: Object.keys(localDatabase[currentSedId]?.llaves || {})
+  });
+  const fullSedPoints = filterFaultsForCircuitView(periodFilteredPoints, {
+    sedId: currentSedId,
+    llaveId: currentLlaveId,
+    showFullSed: true
+  });
+  const filteredPoints = showFullSedView ? fullSedPoints : selectedLlavePoints;
 
   // Seleccionar SED y auto-seleccionar su primera llave
   const handleSedSelect = (sedId) => {
-    setCurrentSedId(sedId);
-    if (sedId && localDatabase[sedId] && localDatabase[sedId].llaves) {
-      const llaves = Object.keys(localDatabase[sedId].llaves);
-      if (llaves.length > 0) {
-        setCurrentLlaveId(llaves[0]);
+    runNavigationTransition('Cargando SED...', () => {
+      setCurrentSedId(sedId);
+      setShowFullSedView(false);
+      if (sedId) setDeepLinkNotice('');
+      if (sedId && localDatabase[sedId] && localDatabase[sedId].llaves) {
+        const llaves = sortLlaveIds(Object.keys(localDatabase[sedId].llaves));
+        if (llaves.length > 0) {
+          setCurrentLlaveId(llaves[0]);
+        } else {
+          setCurrentLlaveId('');
+        }
       } else {
         setCurrentLlaveId('');
       }
-    } else {
-      setCurrentLlaveId('');
-    }
+    });
   };
 
+  const handlePresentationSedSelect = (sedId) => {
+    const selection = resolvePresentationSedSelection(sedId);
+    runNavigationTransition('Cargando SED...', () => {
+      setCurrentSedId(selection.sedId);
+      setCurrentLlaveId(selection.llaveId);
+      setShowFullSedView(selection.showFullSedView);
+      if (sedId) setDeepLinkNotice('');
+    });
+  };
+
+  const handlePresentationLlaveSelect = (llaveId) => {
+    const selection = resolvePresentationLlaveSelection(currentSedId, llaveId);
+    runNavigationTransition('Cargando circuito...', () => {
+      setCurrentLlaveId(selection.llaveId);
+      setShowFullSedView(selection.showFullSedView);
+    });
+  };
+
+  const handleEditLlaveSelect = (llaveId) => {
+    runNavigationTransition('Cargando circuito...', () => {
+      setCurrentLlaveId(llaveId);
+      if (llaveId) setShowFullSedView(false);
+    });
+  };
+
+  const handleToggleFullSedView = () => {
+    if (!showFullSedView) {
+      setShowFullSedView(Boolean(currentSedId));
+      return;
+    }
+    const firstLlave = sortLlaveIds(Object.keys(localDatabase[currentSedId]?.llaves || {}))[0] || '';
+    setCurrentLlaveId(currentLlaveId || firstLlave);
+    setShowFullSedView(false);
+  };
+
+  useEffect(() => {
+    if (!isSedRoute || deepLinkResolved || !mainDataLoaded || !isSupabaseSource) return;
+    const resolution = resolveSedDeepLink(localDatabase, normalizedRequestedSedId);
+    if (resolution.found) {
+      if (isPresentationMode) handlePresentationSedSelect(resolution.sedId);
+      else handleSedSelect(resolution.sedId);
+      setDeepLinkNotice(resolution.notice);
+    } else {
+      setDeepLinkNotice(resolution.notice);
+    }
+    setDeepLinkResolved(true);
+  }, [deepLinkResolved, isPresentationMode, isSedRoute, isSupabaseSource, localDatabase, mainDataLoaded, normalizedRequestedSedId]);
+
+  useEffect(() => {
+    if (!deepLinkResolved || !mainDataLoaded || !isSupabaseSource) return;
+    const nextPath = currentSedId ? buildSedPath(currentSedId) : '/';
+    replaceBrowserPath(nextPath);
+  }, [currentSedId, deepLinkResolved, isSupabaseSource, mainDataLoaded]);
+
+  async function handleCopySedLink() {
+    if (!currentSedId || typeof window === 'undefined') return;
+    try {
+      await navigator.clipboard.writeText(buildSedUrl(window.location.origin, currentSedId));
+      setSedLinkFeedback('Enlace copiado');
+    } catch {
+      setSedLinkFeedback('No se pudo copiar');
+    }
+    if (copyFeedbackTimeoutRef.current) window.clearTimeout(copyFeedbackTimeoutRef.current);
+    copyFeedbackTimeoutRef.current = window.setTimeout(() => setSedLinkFeedback(''), 1800);
+  }
+
+  useEffect(() => () => {
+    if (copyFeedbackTimeoutRef.current) window.clearTimeout(copyFeedbackTimeoutRef.current);
+  }, []);
+
   // Importación JSON
-  function handleImportJson(files) {
+  async function openTemporaryWorkspaceForImport() {
+    if (!isSupabaseSource) return false;
+    const timestamp = new Date().toISOString();
+    const temporaryProject = await createProjectDocument(localDatabase, numberedPointsList, {
+      projectId: `temporary-${Date.now()}`,
+      projectName: `Datos temporales ${timestamp.slice(0, 16).replace('T', ' ')}`,
+      sourceKind: 'LOCAL_TEMPORARY'
+    });
+    await handleOpenLocalProject(temporaryProject, null, { editable: true });
+    return true;
+  }
+
+  async function handleImportJson(files) {
+    if (!isEditable) {
+      alert('El proyecto local está en modo solo lectura. Cierra el proyecto local para cargar registros en la Base Principal.');
+      return;
+    }
     if (!files || files.length === 0) return;
+    const movedToLocalWorkspace = await openTemporaryWorkspaceForImport();
     Array.from(files).forEach(file => {
       const reader = new FileReader();
-      reader.onload = (evt) => {
+      reader.onload = async (evt) => {
         try {
-          const rawData = JSON.parse(evt.target.result);
-          mergeJsonData(rawData, file.name);
+          const rawData = parseProjectJson(evt.target.result);
+          await mergeJsonData(rawData, file.name);
+          if (movedToLocalWorkspace) alert('El JSON se abriÃ³ en una copia local editable. Supabase no fue modificado.');
         } catch(err) {
           alert(`❌ Error al leer el archivo JSON "${file.name}":\n` + err.message);
         }
@@ -198,11 +790,17 @@ export default function Page() {
     });
   }
 
-  function handleImportJsonText(jsonText) {
+  async function handleImportJsonText(jsonText) {
+    if (!isEditable) {
+      alert('El proyecto local está en modo solo lectura. Cierra el proyecto local para cargar registros en la Base Principal.');
+      return;
+    }
     if (!jsonText || !jsonText.trim()) return;
     try {
-      const rawData = JSON.parse(jsonText.trim());
-      mergeJsonData(rawData, 'Texto Pegado');
+      const rawData = parseProjectJson(jsonText.trim());
+      const movedToLocalWorkspace = await openTemporaryWorkspaceForImport();
+      await mergeJsonData(rawData, 'Texto Pegado');
+      if (movedToLocalWorkspace) alert('Los datos pegados se abrieron en una copia local editable. Supabase no fue modificado.');
     } catch(err) {
       alert('❌ Error al procesar el código JSON pegado. Verifique que el formato esté completo y sea un JSON válido.\nDetalle: ' + err.message);
     }
@@ -258,9 +856,53 @@ export default function Page() {
     return null;
   }
 
-  function mergeJsonData(rawData, sourceName = 'Archivo') {
+  function prepareImportedFault(pt, fallbackTicket, fallbackSedLlave = '00007S-3SP') {
+    const ticketVal = String(getFlexibleValue(pt, ['ticket', 'nro', 'incidencia', 'id', 'nroticket'])).trim();
+    const sedLlaveVal = String(getFlexibleValue(pt, ['sedllave', 'sed_llave', 'circuito']) || fallbackSedLlave);
+    const partes = sedLlaveVal.split('-');
+    const sedVal = normalizeSedId(pt.sed_id || pt.sed || partes[0] || 'SED');
+    const llaveSysVal = String(pt.llaveSistema || partes[1] || 'LLAVE');
+    const horaInicio = String(getFlexibleValue(pt, ['horainicio', 'hora', 'fecha', 'inicio']) || '');
+
+    const calls = readCallCountFromRow(pt);
+    return {
+      coords: pt.coords || extractCoordsFromRow(pt),
+      ticket: ticketVal || fallbackTicket,
+      horaInicio,
+      periodKey: derivePeriodKeyFromStartTime(horaInicio),
+      callCount: calls.valid ? calls.value : null,
+      zona: String(getFlexibleValue(pt, ['zona', 'distrito', 'area']) || 'Zona Norte'),
+      set: String(getFlexibleValue(pt, ['set', 'subestacion']) || 'SET'),
+      alimentador: String(getFlexibleValue(pt, ['alimentador', 'alim', 'circuito']) || 'Alim'),
+      nota: String(getFlexibleValue(pt, ['nota', 'comentario', 'observacion']) || 'Falla atendida'),
+      odm: String(getFlexibleValue(pt, ['odm', 'orden']) || 'ODM-000'),
+      suministro: normalizeSuministro(getFlexibleValue(pt, ['suministro', 'nis'])) || '',
+      sedLlave: sedLlaveVal,
+      sed: sedVal,
+      llaveSistema: llaveSysVal,
+      llaveCampo: String(pt.llaveCampo || `${llaveSysVal} (Campo)`),
+      falla: String(getFlexibleValue(pt, ['falla', 'fallareal', 'averia', 'descripcion']) || 'Averia reparada'),
+      causa: normalizeFaultCause(getFlexibleValue(pt, ['causa', 'diagnostico'])),
+      linkCroquis: String(getFlexibleValue(pt, ['linkcroquis', 'croquis', 'link', 'mapa', 'url']) || ''),
+      fotos: pt.fotos || [],
+      coordSource: pt.coordSource || pt.coord_source || null,
+      coordLookupSuministro: pt.coordLookupSuministro || pt.coord_lookup_suministro || null
+    };
+  }
+
+  async function mergeJsonData(rawData, sourceName = 'Archivo') {
     if (!rawData) {
       alert(`⚠️ El contenido de ${sourceName} está vacío.`);
+      return;
+    }
+
+    if (rawData.format === GEOPLUZ_PROJECT_FORMAT) {
+      alert('Este archivo corresponde a un proyecto GEOPLUZ. Ábrelo desde la sección Proyecto para validarlo y visualizarlo de forma segura.');
+      return;
+    }
+
+    if (!isEditable) {
+      alert('El proyecto local está en modo solo lectura. No se mezclaron registros.');
       return;
     }
 
@@ -293,16 +935,25 @@ export default function Page() {
       setLocalDatabase(prev => {
         const updated = { ...prev };
         for (const sedId in incoming) {
+          const incomingSed = incoming[sedId] || {};
+          const normalizedSed = {
+            ...incomingSed,
+            sedCoord: incomingSed.sedCoord ?? incomingSed.sed_coord ?? incomingSed.coords ?? null
+          };
           if (!updated[sedId]) {
-            updated[sedId] = incoming[sedId];
+            updated[sedId] = normalizedSed;
           } else {
             const existingLlaves = { ...(updated[sedId].llaves || {}) };
-            const newLlaves = incoming[sedId].llaves || {};
+            const newLlaves = normalizedSed.llaves || {};
             for (const llaveId in newLlaves) {
               const existingAnalysis = existingLlaves[llaveId]?.analysis;
               existingLlaves[llaveId] = { ...newLlaves[llaveId], ...(existingAnalysis ? { analysis: existingAnalysis } : {}) };
             }
-            updated[sedId] = { ...updated[sedId], llaves: existingLlaves };
+            updated[sedId] = {
+              ...updated[sedId],
+              sedCoord: updated[sedId].sedCoord ?? normalizedSed.sedCoord,
+              llaves: existingLlaves
+            };
           }
         }
 
@@ -360,6 +1011,10 @@ export default function Page() {
       processedAny = true;
       let addedCount = 0;
       const detectedConflicts = [];
+      const lookupCandidates = incomingFallas.map((pt, index) =>
+        prepareImportedFault(pt, `TK-${Date.now()}-${index + 1}`)
+      );
+      const { faults: georeferencedPoints, summary } = await georeferenceFaultBatch(supabase, lookupCandidates);
 
       setNumberedPointsList(prev => {
         const existing = [...prev];
@@ -370,7 +1025,7 @@ export default function Page() {
           }
         });
 
-        incomingFallas.forEach(pt => {
+        georeferencedPoints.forEach(pt => {
           const ticketVal = String(getFlexibleValue(pt, ['ticket', 'nro', 'incidencia', 'id', 'nroticket'])).trim();
           const ticketKey = ticketVal ? ticketVal.toLowerCase() : '';
 
@@ -379,6 +1034,7 @@ export default function Page() {
           const partes = sedLlaveVal.split('-');
           const sedVal = String(pt.sed || (partes[0] ? partes[0] : 'SED'));
           const llaveSysVal = String(pt.llaveSistema || (partes[1] ? partes[1] : 'LLAVE'));
+          const horaInicio = String(getFlexibleValue(pt, ['horainicio', 'hora', 'fecha', 'inicio']) || '');
 
           if (!loadedFirstSed && sedVal) {
             loadedFirstSed = sedVal;
@@ -387,7 +1043,8 @@ export default function Page() {
           const preparedPoint = {
             coords: coords,
             ticket: ticketVal || `TK-${existing.length + 1}`,
-            horaInicio: String(getFlexibleValue(pt, ['horainicio', 'hora', 'fecha', 'inicio']) || new Date().toLocaleString()),
+            horaInicio,
+            periodKey: derivePeriodKeyFromStartTime(horaInicio),
             zona: String(getFlexibleValue(pt, ['zona', 'distrito', 'area']) || 'Zona Norte'),
             set: String(getFlexibleValue(pt, ['set', 'subestacion']) || 'SET'),
             alimentador: String(getFlexibleValue(pt, ['alimentador', 'alim', 'circuito']) || 'Alim'),
@@ -399,9 +1056,11 @@ export default function Page() {
             llaveSistema: llaveSysVal,
             llaveCampo: String(pt.llaveCampo || `${llaveSysVal} (Campo)`),
             falla: String(getFlexibleValue(pt, ['falla', 'fallareal', 'averia', 'descripcion']) || 'Avería reparada'),
-            causa: String(getFlexibleValue(pt, ['causa', 'diagnostico']) || 'Deterioro'),
+            causa: normalizeFaultCause(getFlexibleValue(pt, ['causa', 'diagnostico'])),
             linkCroquis: String(getFlexibleValue(pt, ['linkcroquis', 'croquis', 'link', 'mapa', 'url']) || ''),
-            fotos: pt.fotos || []
+            fotos: pt.fotos || [],
+            coordSource: pt.coordSource || null,
+            coordLookupSuministro: pt.coordLookupSuministro || null
           };
 
           if (ticketKey && existingMap.has(ticketKey)) {
@@ -432,9 +1091,10 @@ export default function Page() {
         setConflictsList(detectedConflicts);
         setCurrentSourceName(sourceName);
         setIsConflictModalOpen(true);
+        setTimeout(() => alert(formatGeoreferenceSummary(summary)), 100);
       } else {
         setTimeout(() => {
-          alert(`✅ ¡FALLAS CARGADAS DESDE ${sourceName.toUpperCase()}!\n\n• Agregados: ${addedCount} registro(s) nuevo(s).`);
+          alert(`✅ ¡FALLAS CARGADAS DESDE ${sourceName.toUpperCase()}!\n\n• Agregados: ${addedCount} registro(s) nuevo(s).\n\n${formatGeoreferenceSummary(summary)}`);
         }, 100);
       }
     }
@@ -484,16 +1144,19 @@ export default function Page() {
 
   // Importación Excel
   function handleImportExcel(file) {
+    if (!isEditable) {
+      alert('El proyecto local está en modo solo lectura. Cierra el proyecto local para importar registros.');
+      return;
+    }
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (evt) => {
+    reader.onload = async (evt) => {
       try {
         const data = new Uint8Array(evt.target.result);
         const workbook = XLSX.read(data, { type: 'array' });
-        let importedPoints = 0;
         let skippedPoints = 0;
-        const newPoints = [...numberedPointsList];
-        const existingTickets = new Set(newPoints.map(p => String(p.ticket).trim().toLowerCase()).filter(Boolean));
+        const importedBatch = [];
+        const existingTickets = new Set(numberedPointsList.map(p => String(p.ticket).trim().toLowerCase()).filter(Boolean));
         let firstImportedSed = null;
 
         workbook.SheetNames.forEach(sheetName => {
@@ -512,49 +1175,32 @@ export default function Page() {
               }
               if (ticketKey) existingTickets.add(ticketKey);
 
-              const sedLlaveVal = String(getFlexibleValue(row, ['sedllave', 'sed_llave', 'circuito']) || sheetName || '00007S-5SP');
-              const partes = sedLlaveVal.split('-');
-              const sedVal = partes[0] || '00007S';
-              const llaveVal = partes[1] || '5SP';
+              const pointData = prepareImportedFault(
+                row,
+                `TK-${Date.now()}-${importedBatch.length + 1}`,
+                sheetName || '00007S-5SP'
+              );
 
-              if (!firstImportedSed && sedVal) {
-                firstImportedSed = sedVal;
+              if (!firstImportedSed && pointData.sed) {
+                firstImportedSed = pointData.sed;
               }
-
-              const pointNum = newPoints.length + 1;
-              const pointData = {
-                number: pointNum,
-                coords: coords,
-                ticket: ticket || `TK-${Math.floor(Math.random()*90000+10000)}`,
-                horaInicio: String(getFlexibleValue(row, ['horainicio', 'hora', 'fecha', 'inicio']) || new Date().toLocaleString()),
-                zona: String(getFlexibleValue(row, ['zona', 'distrito', 'area']) || 'Zona Centro'),
-                set: String(getFlexibleValue(row, ['set', 'subestacion']) || 'SET'),
-                alimentador: String(getFlexibleValue(row, ['alimentador', 'alim', 'circuito']) || 'Alim'),
-                nota: String(getFlexibleValue(row, ['nota', 'comentario', 'observacion']) || 'Falla atendida'),
-                odm: String(getFlexibleValue(row, ['odm', 'orden']) || 'ODM-000'),
-                suministro: String(getFlexibleValue(row, ['suministro', 'nis']) || 'N/A'),
-                sedLlave: sedLlaveVal,
-                sed: sedVal,
-                llaveSistema: llaveVal,
-                llaveCampo: `${llaveVal} (Campo)`,
-                falla: String(getFlexibleValue(row, ['falla', 'fallareal', 'averia', 'descripcion']) || 'Avería reparada'),
-                causa: String(getFlexibleValue(row, ['causa', 'diagnostico']) || 'Deterioro'),
-                linkCroquis: String(getFlexibleValue(row, ['linkcroquis', 'croquis', 'link', 'mapa', 'url']) || '')
-              };
-              newPoints.push(pointData);
-              importedPoints++;
-              saveFallaToSupabase(pointData);
+              importedBatch.push(pointData);
             }
           });
         });
 
-        setNumberedPointsList(newPoints);
+        const { faults: georeferencedPoints, summary } = await georeferenceFaultBatch(supabase, importedBatch);
+        const savedPoints = await saveFallasBatchToSupabase(georeferencedPoints);
+        setNumberedPointsList(prev => [
+          ...prev,
+          ...savedPoints.map((point, index) => ({ ...point, number: prev.length + index + 1 }))
+        ]);
 
         if (firstImportedSed) {
           setCurrentSedId(firstImportedSed);
         }
 
-        let msg = `✅ EXCEL IMPORTADO:\n\n• Agregados: ${importedPoints} registros.`;
+        let msg = `✅ EXCEL IMPORTADO:\n\n• Agregados: ${savedPoints.length} registros.\n\n${formatGeoreferenceSummary(summary)}`;
         if (skippedPoints > 0) {
           msg += `\n• Omitidos por Ticket duplicado: ${skippedPoints} registros.`;
         }
@@ -566,30 +1212,45 @@ export default function Page() {
     reader.readAsArrayBuffer(file);
   }
 
-  function handleExportJson() {
-    const dataStr = JSON.stringify(localDatabase, null, 2);
-    const blob = new Blob([dataStr], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "geopluz_datos.json";
-    link.click();
+  async function handleExportReport(format) {
+    if (reportExportBusyRef.current) return;
+    reportExportBusyRef.current = true;
+    setReportExportStatus('Preparando mapas y reporte...');
+    try {
+      const liveEconomic = reportEconomicRef.current;
+      const economicIsCurrent = liveEconomic?.input && economicAnalysisInput
+        && JSON.stringify(liveEconomic.input) === JSON.stringify(economicAnalysisInput);
+      const model = buildReportModel({
+        sedId: currentSedId, llaveId: showFullSedView ? '' : currentLlaveId, selectedPeriodKeys: activePeriodKeys,
+        faults: visibleFaultPoints, circuitFaults: selectedLlavePoints,
+        network: showFullSedView ? sedOverviewLlaves : currentLlaveData ? [{ llaveId: currentLlaveId, lines: currentLlaveData.lines }] : [],
+        sedCoordinate: currentSedCoord,
+        analysis: analysisPeriodSignature === selectedPeriodSignature ? currentCircuitAnalysis : null,
+        analysisLlaveId: currentLlaveId,
+        selectedSegment: showFullSedView ? null : selectedAnalysisSegment,
+        conclusion: currentAnalysis.note, status: currentAnalysis.status,
+        calls: economicAnalysisInput?.calls, compensation: economicAnalysisInput?.compensation,
+        economic: economicIsCurrent && !showFullSedView ? liveEconomic.simulation : null,
+        economicNote: economicIsCurrent ? liveEconomic.note : ''
+      });
+      if (format === 'excel') await exportExcelBySed(model);
+      else await exportPdfReport(model);
+    } catch (error) {
+      alert(`No se pudo generar el reporte: ${error.message}`);
+    } finally {
+      reportExportBusyRef.current = false;
+      setReportExportStatus('');
+    }
   }
 
-  async function handleExportExcel() {
-    const dataToExport = filteredPoints.length > 0 ? filteredPoints : numberedPointsList;
-    await exportExcelBySed(dataToExport, currentSedId, currentLlaveId);
-  }
-
-  async function handleExportPdf() {
-    const dataToExport = filteredPoints.length > 0 ? filteredPoints : numberedPointsList;
-    await exportPdfReport(dataToExport, currentSedId, currentLlaveId, {
-      status: currentAnalysis.status,
-      note: currentAnalysis.note
-    });
-  }
+  async function handleExportExcel() { await handleExportReport('excel'); }
+  async function handleExportPdf() { await handleExportReport('pdf'); }
 
   async function checkEditPermission() {
+    if (!isEditable) {
+      alert('Este proyecto local está en modo solo lectura. Cierra el proyecto local para volver a editar la Base Principal.');
+      return false;
+    }
     return true;
   }
 
@@ -597,6 +1258,7 @@ export default function Page() {
   // Usando useCallback para que la referencia se actualice cuando cambie relocatingPointIndex,
   // lo que permite que la ref en MapViewer siempre tenga el callback más reciente.
   const handleMapClick = useCallback(async (latlng) => {
+    if (!isEditable) return;
     if (relocatingPointIndex !== null) {
       const allowed = await checkEditPermission();
       if (!allowed) {
@@ -607,10 +1269,7 @@ export default function Page() {
         const updated = [...prev];
         const targetPoint = updated[relocatingPointIndex];
         if (targetPoint) {
-          updated[relocatingPointIndex] = {
-            ...targetPoint,
-            coords: [latlng.lat, latlng.lng]
-          };
+          updated[relocatingPointIndex] = markCoordinatesManual(targetPoint, [latlng.lat, latlng.lng]);
           saveFallaToSupabase(updated[relocatingPointIndex]);
           alert(`✅ Punto de Falla #${targetPoint.localNumber || targetPoint.number || ''} reubicado con éxito en: ${latlng.lat.toFixed(6)}, ${latlng.lng.toFixed(6)}`);
         }
@@ -641,7 +1300,9 @@ export default function Page() {
       llaveSistema: currentLlaveId,
       llaveCampo: `${currentLlaveId} (Campo)`,
       falla: 'Cable subterráneo cortado',
-      causa: 'Excavación externa'
+      causa: 'Excavación externa',
+      coordSource: COORD_SOURCE.MANUAL,
+      coordLookupSuministro: null
     };
     
     const updated = [...numberedPointsList, newPoint];
@@ -649,16 +1310,31 @@ export default function Page() {
     setEditingPointIndex(updated.length - 1);
     setIsFormOpen(true);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [relocatingPointIndex, isAddPointMode, isPresentationMode, numberedPointsList, currentSedId, currentLlaveId]);
+  }, [relocatingPointIndex, isAddPointMode, isPresentationMode, numberedPointsList, currentSedId, currentLlaveId, isEditable]);
 
   // Guardado de Falla
   function handleSavePoint(pointData) {
+    if (!isEditable) {
+      setIsFormOpen(false);
+      setEditingPointIndex(null);
+      return;
+    }
     const updated = [...numberedPointsList];
+    const existingPoint = editingPointIndex !== null ? updated[editingPointIndex] : null;
+    let savedPoint = {
+      ...(existingPoint || {}),
+      ...pointData,
+      suministro: normalizeSuministro(pointData.suministro) || '',
+      coordLookupSuministro: existingPoint?.coordLookupSuministro || pointData.coordLookupSuministro || null
+    };
+    if (!existingPoint || !coordinatePairsEqual(existingPoint, savedPoint)) {
+      savedPoint = markCoordinatesManual(savedPoint, savedPoint.coords);
+    }
     if (editingPointIndex !== null && updated[editingPointIndex]) {
-      updated[editingPointIndex] = { ...updated[editingPointIndex], ...pointData };
+      updated[editingPointIndex] = savedPoint;
     } else {
        // if we are inserting without editing index... but normally editingPointIndex is set
-       updated.push(pointData);
+       updated.push(savedPoint);
     }
     setNumberedPointsList(updated);
     setIsFormOpen(false);
@@ -667,27 +1343,59 @@ export default function Page() {
     setEditingPointIndex(null);
   }
 
+  function buildFallaRecord(point) {
+    const pair = isValidCoordinatePair(point) ? getCoordinatePair(point) : [null, null];
+    return {
+      sed_id: point.sed,
+      llave_code: point.llaveSistema,
+      sed_llave: point.sedLlave,
+      ticket: point.ticket,
+      suministro: normalizeSuministro(point.suministro),
+      falla_real: point.falla,
+      causa: point.causa,
+      nota: point.nota,
+      odm: point.odm,
+      zona: point.zona,
+      set_alimentador: `${point.set || ''} / ${point.alimentador || ''}`,
+      hora_inicio: point.horaInicio,
+      call_count: point.callCount ?? null,
+      latitud: pair[0],
+      longitud: pair[1],
+      link_croquis: point.linkCroquis || null,
+      fotos: point.fotos || [],
+      coord_source: pair[0] !== null ? (point.coordSource || null) : null,
+      coord_lookup_suministro: point.coordLookupSuministro || null
+    };
+  }
+
+  async function saveFallasBatchToSupabase(points) {
+    if (isLocalWorkspace) return points;
+    if (!isSupabaseSource) throw new Error('El proyecto local está en modo solo lectura.');
+    if (!isSupabaseConfigured || !supabase) {
+      throw new Error('Supabase no esta configurado. No se importaron las fallas.');
+    }
+    if (points.length === 0) return [];
+
+    const savedByTicket = new Map();
+    const chunkSize = 300;
+    for (let index = 0; index < points.length; index += chunkSize) {
+      const chunk = points.slice(index, index + chunkSize);
+      const { data, error } = await supabase.from('fallas').insert(chunk.map(buildFallaRecord)).select('id, ticket');
+      if (error) throw error;
+      (data || []).forEach((row) => savedByTicket.set(String(row.ticket || '').trim().toLowerCase(), row.id));
+    }
+
+    return points.map((point) => ({
+      ...point,
+      id: savedByTicket.get(String(point.ticket || '').trim().toLowerCase()) || point.id
+    }));
+  }
+
   async function saveFallaToSupabase(point) {
+    if (!isSupabaseSource) return;
     if (!isSupabaseConfigured || !supabase) return;
     try {
-      const record = {
-        sed_id: point.sed,
-        llave_code: point.llaveSistema,
-        sed_llave: point.sedLlave,
-        ticket: point.ticket,
-        suministro: point.suministro,
-        falla_real: point.falla,
-        causa: point.causa,
-        nota: point.nota,
-        odm: point.odm,
-        zona: point.zona,
-        set_alimentador: `${point.set} / ${point.alimentador}`,
-        hora_inicio: point.horaInicio,
-        latitud: point.coords ? point.coords[0] : null,
-        longitud: point.coords ? point.coords[1] : null,
-        link_croquis: point.linkCroquis || null,
-        fotos: point.fotos || []
-      };
+      const record = buildFallaRecord(point);
       
       if (point.id) {
         await supabase.from('fallas').update(record).eq('id', point.id);
@@ -708,17 +1416,135 @@ export default function Page() {
   }
 
   // Eliminar Falla
-  async function handleDeletePoint() {
-    alert('Eliminar fallas está deshabilitado por la política de seguridad actual.');
+  async function handleDeletePoint(index) {
+    if (!isEditable) {
+      alert('El proyecto local está en modo solo lectura.');
+      return;
+    }
+    const point = numberedPointsList[index];
+    if (!point || deletingPointId !== null) return;
+    if (isLocalWorkspace) {
+      const label = point.ticket ? ` ${point.ticket}` : ` #${point.localNumber || point.number || ''}`;
+      if (!confirm(`¿Eliminar la falla${label} de esta copia local? Supabase no se modificará.`)) return;
+      setNumberedPointsList(prev => prev
+        .filter((_, itemIndex) => itemIndex !== index)
+        .map((item, itemIndex) => ({ ...item, number: itemIndex + 1 }))
+      );
+      setEditingPointIndex(null);
+      setIsFormOpen(false);
+      setRelocatingPointIndex(null);
+      return;
+    }
+    if (!point.id) {
+      alert('Esta falla todavía no tiene un ID persistido. Guárdala en la base principal antes de eliminarla.');
+      return;
+    }
+    if (!isSupabaseConfigured || !supabase) {
+      alert('Supabase no está configurado. La falla no fue eliminada.');
+      return;
+    }
+
+    const label = point.ticket ? ` ${point.ticket}` : ` #${point.localNumber || point.number || ''}`;
+    const confirmed = confirm(`¿Eliminar la falla${label}? Esta acción eliminará el registro de la base de datos.`);
+    if (!confirmed) return;
+
+    setDeletingPointId(point.id);
+    try {
+      const { data, error } = await supabase
+        .from('fallas')
+        .delete()
+        .eq('id', point.id)
+        .select('id');
+
+      if (error) throw error;
+      if (!data || data.length === 0) {
+        throw new Error('Supabase no confirmó la eliminación del registro.');
+      }
+
+      setNumberedPointsList(prev => prev
+        .filter(item => item.id !== point.id)
+        .map((item, itemIndex) => ({ ...item, number: itemIndex + 1 }))
+      );
+      if (editingPointIndex === index) {
+        setEditingPointIndex(null);
+        setIsFormOpen(false);
+      } else if (editingPointIndex !== null && editingPointIndex > index) {
+        setEditingPointIndex(editingPointIndex - 1);
+      }
+      if (relocatingPointIndex === index) {
+        setRelocatingPointIndex(null);
+      } else if (relocatingPointIndex !== null && relocatingPointIndex > index) {
+        setRelocatingPointIndex(relocatingPointIndex - 1);
+      }
+      alert('Falla eliminada correctamente.');
+    } catch (error) {
+      console.error('Error eliminando falla en Supabase:', {
+        message: error?.message || 'Error desconocido',
+        code: error?.code || null
+      });
+      alert('No se pudo eliminar la falla. El registro permanece visible.');
+    } finally {
+      setDeletingPointId(null);
+    }
   }
 
   // Eliminar SED y Llave
-  async function handleDeleteSed() {
-    alert('Eliminar SEDs está deshabilitado por la política de seguridad actual.');
+  async function handleDeleteSed(sedId) {
+    if (!isEditable || !sedId) return;
+    if (isLocalWorkspace) {
+      if (!confirm(`¿Eliminar la SED ${sedId} de esta copia local? Supabase no se modificará.`)) return;
+      setLocalDatabase(prev => {
+        const updated = { ...prev };
+        delete updated[sedId];
+        return updated;
+      });
+      setCurrentSedId('');
+      setCurrentLlaveId('');
+      return;
+    }
+    if (!supabase) return;
+    const allowed = await checkEditPermission();
+    if (!allowed) return;
+    const { count, error: countError } = await supabase.from('fallas').select('*', { count: 'exact', head: true }).eq('sed_id', sedId);
+    if (countError) return alert('No se pudo comprobar si existen fallas relacionadas. No se eliminó la SED.');
+    const confirmed = confirm(`¿Eliminar la SED ${sedId}?\n\nSus llaves se eliminarán por la relación de base de datos.\n${count || 0} fallas tienen sed_id exacto igual a esta SED y NO serán eliminadas.\n\nNo se aplicarán heurísticas sobre sed_llave.`);
+    if (!confirmed) return;
+    const { data, error } = await supabase.from('seds').delete().eq('id', sedId).select('id');
+    if (error || !data?.length) return alert('No se pudo eliminar la SED. No se realizaron limpiezas adicionales.');
+    await invalidateSedsCache();
+    setCurrentSedId('');
+    setCurrentLlaveId('');
+    await loadSupabaseData({ skipCache: true, preservePeriodSelection: true });
+    alert('SED eliminada. Las fallas existentes se conservaron sin modificar.');
   }
 
-  async function handleDeleteLlave() {
-    alert('Eliminar llaves está deshabilitado por la política de seguridad actual.');
+  async function handleDeleteLlave(sedId, llaveCode) {
+    if (!isEditable || !sedId || !llaveCode) return;
+    if (isLocalWorkspace) {
+      if (!confirm(`¿Eliminar el circuito ${llaveCode} de esta copia local? Supabase no se modificará.`)) return;
+      setLocalDatabase(prev => {
+        const sed = prev[sedId];
+        if (!sed?.llaves?.[llaveCode]) return prev;
+        const llaves = { ...sed.llaves };
+        delete llaves[llaveCode];
+        return { ...prev, [sedId]: { ...sed, llaves } };
+      });
+      setCurrentLlaveId('');
+      return;
+    }
+    if (!supabase) return;
+    const allowed = await checkEditPermission();
+    if (!allowed) return;
+    const { count, error: countError } = await supabase.from('fallas').select('*', { count: 'exact', head: true }).eq('sed_id', sedId).eq('llave_code', llaveCode);
+    if (countError) return alert('No se pudo comprobar si existen fallas relacionadas. No se eliminó el circuito.');
+    const confirmed = confirm(`¿Eliminar el circuito ${llaveCode} de la SED ${sedId}?\n\n${count || 0} fallas coinciden exactamente en sed_id y llave_code y NO serán eliminadas.`);
+    if (!confirmed) return;
+    const { data, error } = await supabase.from('llaves').delete().eq('sed_id', sedId).eq('llave_code', llaveCode).select('id');
+    if (error || !data?.length) return alert('No se pudo eliminar el circuito. Las fallas permanecen intactas.');
+    await invalidateSedsCache();
+    setCurrentLlaveId('');
+    await loadSupabaseData({ skipCache: true, preservePeriodSelection: true });
+    alert('Circuito eliminado. Las fallas existentes se conservaron sin modificar.');
   }
 
   // Reubicación
@@ -730,6 +1556,7 @@ export default function Page() {
   }
 
   async function saveSedsToSupabase(sedsToSave) {
+    if (!isSupabaseSource) return;
     // Guardar en la caché local IndexedDB
     setCachedSeds(sedsToSave);
 
@@ -775,6 +1602,10 @@ export default function Page() {
   }
 
   async function handleSaveToMainDatabase() {
+    if (!isSupabaseSource) {
+      alert('La copia editable se guarda solo en este navegador. Usa "Descargar proyecto" para compartirla; Supabase no se modificará.');
+      return;
+    }
     const allowed = await checkEditPermission();
     if (!allowed) return;
 
@@ -784,31 +1615,6 @@ export default function Page() {
 
       // 2. Guardar Fallas en lote masivo (Bulk Upsert)
       if (numberedPointsList.length > 0) {
-        const fallasBatch = numberedPointsList.map(point => {
-          const record = {
-            sed_id: point.sed,
-            llave_code: point.llaveSistema,
-            sed_llave: point.sedLlave,
-            ticket: point.ticket,
-            suministro: point.suministro,
-            falla_real: point.falla,
-            causa: point.causa,
-            nota: point.nota,
-            odm: point.odm,
-            zona: point.zona,
-            set_alimentador: `${point.set} / ${point.alimentador}`,
-            hora_inicio: point.horaInicio,
-            latitud: point.coords ? point.coords[0] : null,
-            longitud: point.coords ? point.coords[1] : null,
-            link_croquis: point.linkCroquis || null,
-            fotos: point.fotos || []
-          };
-          if (point.id) {
-            record.id = point.id;
-          }
-          return record;
-        });
-
         if (isSupabaseConfigured && supabase) {
           // 1. Consultar a Supabase qué tickets ya existen en la BD para vincular sus IDs
           const ticketsList = numberedPointsList.map(p => p.ticket).filter(Boolean);
@@ -838,24 +1644,7 @@ export default function Page() {
             const tKey = point.ticket ? String(point.ticket).trim().toLowerCase() : '';
             const existingId = point.id || existingTicketsMap.get(tKey);
 
-            const record = {
-              sed_id: point.sed,
-              llave_code: point.llaveSistema,
-              sed_llave: point.sedLlave,
-              ticket: point.ticket,
-              suministro: point.suministro,
-              falla_real: point.falla,
-              causa: point.causa,
-              nota: point.nota,
-              odm: point.odm,
-              zona: point.zona,
-              set_alimentador: `${point.set} / ${point.alimentador}`,
-              hora_inicio: point.horaInicio,
-              latitud: point.coords ? point.coords[0] : null,
-              longitud: point.coords ? point.coords[1] : null,
-              link_croquis: point.linkCroquis || null,
-              fotos: point.fotos || []
-            };
+            const record = buildFallaRecord(point);
             if (existingId) {
               record.id = existingId;
             }
@@ -919,7 +1708,7 @@ export default function Page() {
 
   function handleFlyToPoint(point) {
     if (mapRef.current && point.coords) {
-      mapRef.current.focusFailure(point.coords);
+      mapRef.current.focusFailure(point);
     }
   }
 
@@ -931,15 +1720,7 @@ export default function Page() {
     let newIndex = currentIndex + dir;
     if (newIndex < 0) newIndex = sedsList.length - 1;
     if (newIndex >= sedsList.length) newIndex = 0;
-    setCurrentSedId(sedsList[newIndex]);
-    
-    // Select first llave of the new SED
-    const llaves = Object.keys(localDatabase[sedsList[newIndex]].llaves || {});
-    if (llaves.length > 0) {
-      setCurrentLlaveId(llaves[0]);
-    } else {
-      setCurrentLlaveId('');
-    }
+    handlePresentationSedSelect(sedsList[newIndex]);
   }
 
   useEffect(() => {
@@ -956,6 +1737,12 @@ export default function Page() {
   useEffect(() => {
     setIsSegmentSelectionMode(false);
     setSelectedLineIds([]);
+    setSelectedManualEdgeRefs([]);
+    setCircuitPhase1Analysis(null);
+    setAnalysisCircuitKey('');
+    setAnalysisPeriodSignature('');
+    setSelectedAnalysisSegmentId(null);
+    setFilterByAnalysisSegment(false);
   }, [currentSedId, currentLlaveId]);
 
   const currentLlaveData = currentSedId && currentLlaveId && localDatabase[currentSedId]?.llaves?.[currentLlaveId]
@@ -965,21 +1752,101 @@ export default function Page() {
   const currentSedCoord = localDatabase[currentSedId]?.sedCoord || null;
 
   const currentAnalysis = currentLlaveData?.analysis || { note: '', cableGroups: [], status: 'cargado' };
-  const circuitEntries = Object.entries(localDatabase).flatMap(([sedId, sed]) => Object.entries(sed.llaves || {}).map(([llaveId, llave]) => ({
-    sedId, llaveId, sedName: sed.name || sedId, status: llave.analysis?.status || 'cargado'
-  })));
-  const selectedDistance = (currentLlaveData?.lines || [])
-    .filter((line, index) => selectedLineIds.includes(String(line.id ?? index)))
-    .reduce((total, line) => total + (Number(line.length) || 0), 0);
+  const currentCircuitKey = currentSedId && currentLlaveId ? `${currentSedId}:${currentLlaveId}` : '';
+  const currentCircuitAnalysis = analysisCircuitKey === currentCircuitKey ? circuitPhase1Analysis : null;
+  const selectedAnalysisSegment = resolveAnalysisSegment(currentCircuitAnalysis?.analysisSegmentIndicators, selectedAnalysisSegmentId);
+  const analysisSegmentFaultView = buildAnalysisSegmentFaultView(
+    selectedLlavePoints,
+    currentCircuitAnalysis?.faultAssignment,
+    selectedAnalysisSegment,
+    filterByAnalysisSegment
+  );
+  const relocatedCircuitFaultsByOriginalIndex = new Map(applyAnalyticalFaultCoordinates(
+    selectedLlavePoints,
+    currentCircuitAnalysis?.faultAssignment
+  )
+    .filter(point => point?.relocatedViaClient && Number.isInteger(point?.originalIndex))
+    .map(point => [point.originalIndex, point]));
+  const visibleFaultPoints = showFullSedView
+    ? fullSedPoints.map(point => relocatedCircuitFaultsByOriginalIndex.get(point.originalIndex) || point)
+    : analysisSegmentFaultView.faults;
+  const sedOverviewLlaves = buildSedOverviewLlaves(localDatabase[currentSedId], currentLlaveId);
+  const selectedAnalysisSegmentEdges = selectedAnalysisSegment
+    ? [...selectedAnalysisSegment.edgeIds, ...selectedAnalysisSegment.connectorEdgeIds]
+      .map(edgeId => currentCircuitAnalysis?.topology?.originalEdges?.find(edge => edge.edgeId === edgeId))
+      .filter(Boolean)
+    : [];
+  const selectedDistance = selectedManualEdgeRefs.reduce((total, ref) => total + (Number(ref.lengthMeters) || 0), 0);
+  const selectedPeriodSignature = activePeriodKeys.join('|');
+  const economicAnalysisInput = selectedAnalysisSegment && analysisPeriodSignature === selectedPeriodSignature
+    ? buildEconomicAnalysisInput({
+      sedId: currentSedId,
+      circuitId: currentLlaveId,
+      analysisUnit: selectedAnalysisSegment,
+      selectedPeriodKeys: activePeriodKeys,
+      availablePeriods: faultPeriods,
+      faults: selectedLlavePoints,
+      circuitCompensationRows: circuitMonthlyMetrics,
+      sedMetricReconciliation: selectedSedMetricReconciliation
+    })
+    : null;
+  const economicSimulations = (currentAnalysis.economicSimulations || [])
+    .filter(snapshot => snapshot?.analysisUnitId === selectedAnalysisSegmentId);
 
-  function updateCurrentLlaveAnalysis(updater) {
+  useEffect(() => {
+    if (!currentCircuitAnalysis || !currentLlaveData) return;
+    const linesData = Array.isArray(currentLlaveData.linesData)
+      ? currentLlaveData.linesData
+      : serializeLlaveLines(currentLlaveData);
+    const nextAnalysis = analyzeCircuit(linesData, selectedLlavePoints, { rootCoordinate: currentSedCoord });
+    const nextSelectedSegment = resolveAnalysisSegment(nextAnalysis.analysisSegmentIndicators, selectedAnalysisSegmentId);
+    setCircuitPhase1Analysis(nextAnalysis);
+    setAnalysisPeriodSignature(selectedPeriodSignature);
+    setSelectedAnalysisSegmentId(nextSelectedSegment?.analysisSegmentId || null);
+    if (!nextSelectedSegment) setFilterByAnalysisSegment(false);
+  }, [selectedPeriodSignature]);
+
+  async function handleAnalyzeCurrentCircuit() {
+    if (!currentLlaveData) return;
+    setIsAnalyzingCircuit(true);
+    await new Promise(resolve => window.requestAnimationFrame(() => window.setTimeout(resolve, 0)));
+    try {
+      const linesData = Array.isArray(currentLlaveData.linesData)
+        ? currentLlaveData.linesData
+        : serializeLlaveLines(currentLlaveData);
+      const nextAnalysis = analyzeCircuit(linesData, selectedLlavePoints, { rootCoordinate: currentSedCoord });
+      const nextSelectedSegment = resolveAnalysisSegment(nextAnalysis.analysisSegmentIndicators, selectedAnalysisSegmentId);
+      setCircuitPhase1Analysis(nextAnalysis);
+      setAnalysisCircuitKey(currentCircuitKey);
+      setAnalysisPeriodSignature(selectedPeriodSignature);
+      setSelectedAnalysisSegmentId(nextSelectedSegment?.analysisSegmentId || null);
+      if (!nextSelectedSegment) setFilterByAnalysisSegment(false);
+    } finally {
+      setIsAnalyzingCircuit(false);
+    }
+  }
+
+  function handleSelectAnalysisSegment(analysisSegmentId) {
+    if (analysisSegmentId === selectedAnalysisSegmentId) {
+      setSelectedAnalysisSegmentId(null);
+      setFilterByAnalysisSegment(false);
+      return;
+    }
+    setSelectedAnalysisSegmentId(analysisSegmentId);
+  }
+
+  function updateCurrentLlaveAnalysis(updater, { invalidateCircuitAnalysis = true } = {}) {
+    if (!isEditable) return;
     if (!currentSedId || !currentLlaveId) return;
+    if (invalidateCircuitAnalysis) setCircuitPhase1Analysis(null);
     setLocalDatabase(prev => {
       const llave = prev[currentSedId]?.llaves?.[currentLlaveId];
       if (!llave) return prev;
-      const updatedLlave = { ...llave, analysis: updater(llave.analysis || { note: '', cableGroups: [] }) };
+      const analysis = updater(llave.analysis || { note: '', cableGroups: [] });
+      const updatedLlave = { ...llave, analysis, linesData: null };
+      updatedLlave.linesData = serializeLlaveLines(updatedLlave);
       const updated = { ...prev, [currentSedId]: { ...prev[currentSedId], llaves: { ...prev[currentSedId].llaves, [currentLlaveId]: updatedLlave } } };
-      setCachedSeds(updated);
+      if (isSupabaseSource) setCachedSeds(updated);
       saveSedsToSupabase({ [currentSedId]: updated[currentSedId] });
       return updated;
     });
@@ -998,40 +1865,132 @@ export default function Page() {
     updateCurrentLlaveAnalysis(analysis => ({ ...analysis, status }));
   }
 
-  function handleLineClick(lineId) {
+  function createCurrentManualSelectionTopology() {
+    if (!currentLlaveData) return null;
+    if (currentCircuitAnalysis?.topology) return currentCircuitAnalysis.topology;
+    const linesData = Array.isArray(currentLlaveData.linesData)
+      ? currentLlaveData.linesData
+      : serializeLlaveLines(currentLlaveData);
+    const phase1 = analyzeCircuitPhase1(linesData);
+    return buildCircuitTopology(phase1.physicalSegmentRecords, { rootCoordinate: currentSedCoord });
+  }
+
+  function setManualEdgeSelection(nextRefs) {
+    const sorted = [...nextRefs].sort((left, right) => left.edgeId.localeCompare(right.edgeId));
+    setSelectedManualEdgeRefs(sorted);
+    setSelectedLineIds([...new Set(sorted.map(ref => ref.lineId))]);
+  }
+
+  function handleLineClick(lineId, edgeRef = null) {
     if (!isSegmentSelectionMode) return;
-    setSelectedLineIds(prev => prev.includes(String(lineId)) ? prev.filter(id => id !== String(lineId)) : [...prev, String(lineId)]);
+    const candidates = edgeRef
+      ? [edgeRef]
+      : buildManualEdgeCatalog(currentLlaveData?.lines || []).filter(ref => ref.lineId === String(lineId));
+    if (!candidates.length) return;
+    const topology = manualSelectionTopology || createCurrentManualSelectionTopology();
+    if (!topology) return;
+    if (!manualSelectionTopology) setManualSelectionTopology(topology);
+    const analyticalEdgeIds = new Set((topology.edges || []).map(edge => edge.edgeId));
+    const analyticalCandidates = candidates.filter(ref => analyticalEdgeIds.has(ref.edgeId));
+    if (!analyticalCandidates.length) {
+      setManualSelectionMessage('Ese tramo es visible, pero está excluido de la red analítica.');
+      return;
+    }
+
+    if (!manualPathSelectionComplete) {
+      const clicked = analyticalCandidates[0];
+      if (!manualPathStartEdgeId) {
+        setManualEdgeSelection([clicked]);
+        setManualPathStartEdgeId(clicked.edgeId);
+        setManualSelectionMessage('Inicio fijado. Haz clic en el tramo final del recorrido.');
+        return;
+      }
+      const path = findUniqueAnalyticalEdgePath(topology, manualPathStartEdgeId, clicked.edgeId);
+      if (path.status !== 'found') {
+        setManualSelectionMessage(path.status === 'ambiguous'
+          ? 'Hay más de un camino posible: la topología no es radial en este sector.'
+          : 'No existe un camino analítico entre los dos puntos seleccionados.');
+        return;
+      }
+      const catalogByEdgeId = new Map(buildManualEdgeCatalog(currentLlaveData?.lines || []).map(ref => [ref.edgeId, ref]));
+      const pathRefs = path.edgeIds.map(edgeId => catalogByEdgeId.get(edgeId)).filter(Boolean);
+      if (pathRefs.length !== path.edgeIds.length) {
+        setManualSelectionMessage('El recorrido contiene geometría que no puede seleccionarse visualmente.');
+        return;
+      }
+      setManualEdgeSelection(pathRefs);
+      setManualPathStartEdgeId(null);
+      setManualPathSelectionComplete(true);
+      setManualSelectionMessage(`Recorrido completo seleccionado: ${pathRefs.length} tramos. Puedes ajustarlo manualmente.`);
+      return;
+    }
+
+    setSelectedManualEdgeRefs((current) => {
+      const selectedIds = new Set(current.map(ref => ref.edgeId));
+      const remove = analyticalCandidates.every(ref => selectedIds.has(ref.edgeId));
+      const next = remove
+        ? current.filter(ref => !analyticalCandidates.some(candidate => candidate.edgeId === ref.edgeId))
+        : [...current, ...analyticalCandidates.filter(ref => !selectedIds.has(ref.edgeId))];
+      if (next.length > 1 && splitEdgeIdsIntoConnectedComponents(next.map(ref => ref.edgeId), topology).length > 1) {
+        setManualSelectionMessage('Ese ajuste dejaría el recorrido desconectado y no se aplicó.');
+        return current;
+      }
+      setSelectedLineIds([...new Set(next.map(ref => ref.lineId))]);
+      setManualSelectionMessage('Recorrido ajustado manualmente.');
+      return next.sort((left, right) => left.edgeId.localeCompare(right.edgeId));
+    });
   }
 
   async function handleToggleSegmentSelection() {
     if (!isSegmentSelectionMode) {
       const allowed = await checkEditPermission();
       if (!allowed) return;
+      setManualSelectionTopology(createCurrentManualSelectionTopology());
+      setManualPathStartEdgeId(null);
+      setManualPathSelectionComplete(false);
+      setManualSelectionMessage('Haz clic en el tramo inicial y luego en el tramo final.');
       setIsSegmentSelectionMode(true);
       setSelectedLineIds([]);
+      setSelectedManualEdgeRefs([]);
     } else {
       setIsSegmentSelectionMode(false);
       setSelectedLineIds([]);
+      setSelectedManualEdgeRefs([]);
+      setManualSelectionTopology(null);
+      setManualPathStartEdgeId(null);
+      setManualPathSelectionComplete(false);
+      setManualSelectionMessage('');
     }
   }
 
   async function handleStartEditCableGroup(group) {
     const allowed = await checkEditPermission();
     if (!allowed) return false;
-    setSelectedLineIds(group.lineIds ? group.lineIds.map(String) : []);
+    const resolution = resolveManualGroupEdgeRefs(group, currentLlaveData?.lines || []);
+    setManualSelectionTopology(createCurrentManualSelectionTopology());
+    setManualPathStartEdgeId(null);
+    setManualPathSelectionComplete(true);
+    setManualSelectionMessage('Tramo cargado. Puedes agregar o quitar segmentos conectados.');
+    setSelectedManualEdgeRefs(resolution.edgeRefs);
+    setSelectedLineIds([...new Set(resolution.edgeRefs.map(ref => ref.lineId))]);
     setIsSegmentSelectionMode(true);
     return true;
   }
 
   function handleCancelEditCableGroup() {
     setSelectedLineIds([]);
+    setSelectedManualEdgeRefs([]);
     setIsSegmentSelectionMode(false);
+    setManualSelectionTopology(null);
+    setManualPathStartEdgeId(null);
+    setManualPathSelectionComplete(false);
+    setManualSelectionMessage('');
   }
 
   async function handleSaveCableGroup({ id, name, calibre, color, note }) {
     const allowed = await checkEditPermission();
     if (!allowed) return;
-    if (!selectedLineIds.length) return;
+    if (!selectedManualEdgeRefs.length) return;
 
     const groupId = id || `cable-${Date.now()}`;
     const group = {
@@ -1040,19 +1999,32 @@ export default function Page() {
       calibre,
       color,
       note: note || '',
-      lineIds: selectedLineIds,
+      analysisUnit: true,
+      lineIds: [...new Set(selectedManualEdgeRefs.map(ref => ref.lineId))],
+      edgeRefs: selectedManualEdgeRefs,
       distance: selectedDistance
     };
 
     updateCurrentLlaveAnalysis(analysis => {
       const existingGroups = analysis.cableGroups || [];
+      const selectedEdgeIds = new Set(selectedManualEdgeRefs.map(ref => ref.edgeId));
       const cleanedGroups = existingGroups
         .filter(item => item.id !== groupId)
-        .map(item => ({
-          ...item,
-          lineIds: item.lineIds ? item.lineIds.filter(lid => !selectedLineIds.includes(String(lid))) : []
-        }))
-        .filter(item => item.lineIds && item.lineIds.length > 0);
+        .map(item => {
+          const isExplicitAnalysisUnit = item?.analysisUnit === true || item?.analysis_unit === true ||
+            (Array.isArray(item?.edgeRefs) && item.edgeRefs.length > 0) ||
+            (Array.isArray(item?.edge_refs) && item.edge_refs.length > 0);
+          if (!isExplicitAnalysisUnit) return item;
+          const remainingRefs = resolveManualGroupEdgeRefs(item, currentLlaveData?.lines || []).edgeRefs
+            .filter(ref => !selectedEdgeIds.has(ref.edgeId));
+          return {
+            ...item,
+            edgeRefs: remainingRefs,
+            lineIds: [...new Set(remainingRefs.map(ref => ref.lineId))],
+            distance: remainingRefs.reduce((total, ref) => total + (Number(ref.lengthMeters) || 0), 0)
+          };
+        })
+        .filter(item => !Array.isArray(item.edgeRefs) || item.edgeRefs.length > 0);
 
       return {
         ...analysis,
@@ -1061,7 +2033,12 @@ export default function Page() {
     });
 
     setSelectedLineIds([]);
+    setSelectedManualEdgeRefs([]);
     setIsSegmentSelectionMode(false);
+    setManualSelectionTopology(null);
+    setManualPathStartEdgeId(null);
+    setManualPathSelectionComplete(false);
+    setManualSelectionMessage('');
   }
 
   async function handleDeleteCableGroup(groupId) {
@@ -1076,83 +2053,286 @@ export default function Page() {
 
   async function handleEnterEditMode() {
     const allowed = await checkEditPermission();
-    if (allowed) {
-      setIsPresentationMode(false);
+    if (allowed) setIsPresentationMode(false);
+  }
+
+  async function handleSaveEconomicSimulation(snapshot) {
+    const allowed = await checkEditPermission();
+    if (!allowed || !snapshot || snapshot.analysisUnitId !== selectedAnalysisSegmentId) return false;
+    updateCurrentLlaveAnalysis(analysis => ({
+      ...analysis,
+      economicSimulations: [...(analysis.economicSimulations || []), snapshot]
+    }), { invalidateCircuitAnalysis: false });
+    return true;
+  }
+
+  function handleEnterPresentationMode() {
+    setIsPresentationMode(true);
+  }
+
+  async function handleImportMonthly(preview, { replace = false } = {}) {
+    if (!isSupabaseSource || !periodSupport || !supabase) throw new Error('La carga mensual online requiere Base Principal y la migración de periodos aplicada.');
+    await requireLifecycleSession();
+    const { rows: georeferencedRows } = await georeferenceMonthlyFaultRows(supabase, preview.rows);
+    const { data, error } = await supabase.rpc('geopluz_import_fault_period', {
+      p_period_key: preview.periodKey,
+      p_label: preview.periodLabel,
+      p_rows: georeferencedRows,
+      p_replace: Boolean(replace)
+    });
+    if (error) throw error;
+    await loadSupabaseData({ skipCache: true, preservePeriodSelection: true });
+    return data;
+  }
+
+  async function handleImportCompensation(preview, { replace = false } = {}) {
+    if (!isSupabaseSource || !periodSupport || !supabase) throw new Error('La compensación mensual online requiere Base Principal y la migración aplicada.');
+    await requireLifecycleSession();
+    const { data, error } = await supabase.rpc('geopluz_import_sed_compensation_period', {
+      p_period_key: preview.periodKey,
+      p_rows: preview.rows,
+      p_replace: Boolean(replace)
+    });
+    if (error) throw error;
+    await loadSupabaseData({ skipCache: true, preservePeriodSelection: true });
+    return data;
+  }
+
+  async function handleDeleteCompensationPeriod(period) {
+    if (!isSupabaseSource || !periodSupport || !supabase) throw new Error('La compensación no puede eliminarse desde el modo actual.');
+    await requireLifecycleSession();
+    const { data, error } = await supabase.rpc('geopluz_delete_sed_compensation_period', {
+      p_period_key: period.periodKey,
+      p_expected_rows: period.sedCount
+    });
+    if (error) throw error;
+    await loadSupabaseData({ skipCache: true, preservePeriodSelection: true });
+    return data;
+  }
+
+  async function handleImportCircuitCompensation(preview, { replace = false } = {}) {
+    if (!isSupabaseSource || !periodSupport || !circuitCompensationSupport || !supabase) throw new Error('La compensación por llave requiere Base Principal y la migración aplicada.');
+    await requireLifecycleSession();
+    const { data, error } = await supabase.rpc('geopluz_import_circuit_compensation_range', {
+      p_period_start_key: preview.periodKey,
+      p_period_end_key: preview.periodEndKey || preview.periodKey,
+      p_rows: preview.rows,
+      p_replace: Boolean(replace)
+    });
+    if (error) throw error;
+    await loadSupabaseData({ skipCache: true, preservePeriodSelection: true });
+    return data;
+  }
+
+  async function handleDeleteCircuitCompensationPeriod(period) {
+    if (!isSupabaseSource || !circuitCompensationSupport || !supabase) throw new Error('La compensación por llave no puede eliminarse desde el modo actual.');
+    await requireLifecycleSession();
+    const { data, error } = await supabase.rpc('geopluz_delete_circuit_compensation_range', {
+      p_period_start_key: period.periodKey,
+      p_period_end_key: period.periodEndKey || period.periodKey,
+      p_expected_rows: period.circuitCount
+    });
+    if (error) throw error;
+    await loadSupabaseData({ skipCache: true, preservePeriodSelection: true });
+    return data;
+  }
+
+  async function handleDeleteFaultPeriod(period) {
+    if (!isSupabaseSource || !periodSupport || !supabase || period?.periodKey === UNASSIGNED_PERIOD_KEY) throw new Error('Este periodo no puede eliminarse desde el modo actual.');
+    await requireLifecycleSession();
+    const { data, error } = await supabase.rpc('geopluz_delete_fault_period', {
+      p_period_key: period.periodKey,
+      p_expected_rows: period.rowCount
+    });
+    if (error) throw error;
+    await loadSupabaseData({ skipCache: true, preservePeriodSelection: true });
+    return data;
+  }
+
+  async function handleSaveWorkProject(config) {
+    if (isSupabaseSource && periodSupport && supabase) {
+      const { session } = await requireLifecycleSession();
+      const row = {
+        id: config.id,
+        owner_id: session.user.id,
+        name: config.name,
+        description: config.description,
+        sed_ids: config.sed_ids,
+        period_keys: config.period_keys,
+        created_at: config.created_at,
+        updated_at: config.updated_at
+      };
+      const { error } = await supabase.from('geopluz_work_projects').insert(row);
+      if (error) throw error;
+      setWorkProjects(current => [{ ...config, owner_id: session.user.id }, ...current.filter(item => item.id !== config.id)]);
+      return;
     }
+    const saved = await saveLocalWorkProjectConfig(config);
+    if (!saved) throw new Error('El navegador no pudo guardar la configuración local.');
+    setWorkProjects(await listLocalWorkProjectConfigs());
+  }
+
+  async function handleOpenWorkProject(config) {
+    const validation = validateWorkProjectConfig(config, Object.keys(localDatabase), faultPeriods.map(period => period.periodKey));
+    if (!validation.valid) throw new Error(validation.errors.join(' '));
+    const availablePeriods = config.period_keys.filter(key => !validation.missingPeriods.includes(key));
+    const availableSeds = config.sed_ids.filter(id => !validation.missingSeds.includes(id));
+    if (validation.missingSeds.length || validation.missingPeriods.length) {
+      alert(`El proyecto se abrirá parcialmente.\nSED ausentes: ${validation.missingSeds.join(', ') || 'ninguna'}\nPeriodos ausentes: ${validation.missingPeriods.join(', ') || 'ninguno'}`);
+    }
+    setActiveWorkSedIds(availableSeds);
+    await handleChangeSelectedPeriods(availablePeriods);
+    if (availableSeds[0]) handleSedSelect(availableSeds[0]);
+  }
+
+  async function handleDeleteWorkProject(projectId) {
+    if (!confirm('¿Eliminar esta definición de proyecto? No se borrarán SED, geometrías ni fallas.')) return;
+    const onlineProject = isSupabaseSource && periodSupport && workProjects.some(project => project.id === projectId && project.owner_id);
+    if (onlineProject) {
+      const { error } = await supabase.from('geopluz_work_projects').delete().eq('id', projectId);
+      if (error) return alert('No se pudo eliminar la definición del proyecto.');
+    } else {
+      await removeLocalWorkProjectConfig(projectId);
+    }
+    setWorkProjects(current => current.filter(project => project.id !== projectId));
   }
 
   return (
     <>
+      <DataSourceBadge dataSource={dataSource} onCloseLocalProject={handleCloseLocalProject} />
+      {deepLinkNotice && <div className="sed-deep-link-notice" role="status">{deepLinkNotice}</div>}
+      {reportExportStatus && <div className="frontend-loading-status" role="status" aria-live="polite">{reportExportStatus}</div>}
+      {(isAnalyzingCircuit || isNavigationPending) && <div className="frontend-loading-status" role="status" aria-live="polite">
+        <span className="frontend-loading-spinner" aria-hidden="true"></span>
+        {isAnalyzingCircuit ? 'Analizando circuito...' : navigationLabel}
+      </div>}
       {!isPresentationMode && (
         <Sidebar
           seds={localDatabase}
-          faultPoints={numberedPointsList}
-          filteredFaultPoints={filteredPoints}
+          faultPoints={periodFilteredPoints}
+          filteredFaultPoints={visibleFaultPoints}
+          analysisFaultAssignments={analysisSegmentFaultView.assignments}
+          analysisCircuitFaultTotal={selectedLlavePoints.length}
           currentSedId={currentSedId}
           setCurrentSedId={handleSedSelect}
           currentLlaveId={currentLlaveId}
-          setCurrentLlaveId={setCurrentLlaveId}
-          currentTheme={currentTheme}
-          setCurrentTheme={setCurrentTheme}
-          currentMapStyle={currentMapStyle}
-          setCurrentMapStyle={setCurrentMapStyle}
+          setCurrentLlaveId={handleEditLlaveSelect}
+          showFullSedView={showFullSedView}
+          onToggleFullSedView={handleToggleFullSedView}
           isAddPointMode={isAddPointMode}
           setIsAddPointMode={setIsAddPointMode}
           isPresentationMode={isPresentationMode}
           isEditable={isEditable}
+          canSyncToMainDatabase={isSupabaseSource}
           circuitNote={currentAnalysis.note}
           cableGroups={currentAnalysis.cableGroups || []}
           circuitStatus={currentAnalysis.status}
+          circuitPhase1Analysis={currentCircuitAnalysis}
+          selectedAnalysisSegmentId={selectedAnalysisSegmentId}
+          filterByAnalysisSegment={filterByAnalysisSegment}
           isSegmentSelectionMode={isSegmentSelectionMode}
-          selectedLineCount={selectedLineIds.length}
+          selectedLineCount={selectedManualEdgeRefs.length}
           selectedDistance={selectedDistance}
+          manualSelectionMessage={manualSelectionMessage}
+          economicAnalysisInput={economicAnalysisInput}
+          economicSimulations={economicSimulations}
           onSaveCircuitNote={handleSaveCircuitNote}
           onSaveCircuitStatus={handleSaveCircuitStatus}
+          onAnalyzeCircuit={handleAnalyzeCurrentCircuit}
+          onSelectAnalysisSegment={handleSelectAnalysisSegment}
+          onFilterSelectedAnalysisSegment={() => { if (selectedAnalysisSegment) setFilterByAnalysisSegment(true); }}
+          onShowAllAnalysisFaults={() => setFilterByAnalysisSegment(false)}
+          onSaveEconomicSimulation={handleSaveEconomicSimulation}
+          onReportEconomicChange={handleReportEconomicChange}
           onToggleSegmentSelection={handleToggleSegmentSelection}
           onStartEditCableGroup={handleStartEditCableGroup}
           onCancelEditCableGroup={handleCancelEditCableGroup}
           onSaveCableGroup={handleSaveCableGroup}
           onDeleteCableGroup={handleDeleteCableGroup}
-          onTogglePresentationMode={() => setIsPresentationMode(true)}
+          onTogglePresentationMode={handleEnterPresentationMode}
           onImportJson={handleImportJson}
           onImportJsonText={handleImportJsonText}
           onImportExcel={handleImportExcel}
-          onExportJson={handleExportJson}
           onExportExcel={handleExportExcel}
           onExportPdf={handleExportPdf}
           onSaveToMainDatabase={handleSaveToMainDatabase}
           onDeleteSed={handleDeleteSed}
           onDeleteLlave={handleDeleteLlave}
-          onEditPoint={(idx) => { setEditingPointIndex(idx); setIsFormOpen(true); }}
+          onEditPoint={(idx) => { if (isEditable) { setEditingPointIndex(idx); setIsFormOpen(true); } }}
           onDeletePoint={handleDeletePoint}
+          deletingPointId={deletingPointId}
           onRelocatePoint={handleRelocatePoint}
-          onFlyToPoint={(point) => mapRef.current?.focusFailure?.(point.coords)}
-          onFaultTableExpanded={setIsFaultTableExpanded}
+          onFlyToPoint={(point) => mapRef.current?.focusFailure?.(point)}
+          onMajorOverlayChange={setMajorOverlayOpen}
+          dataSource={dataSource}
+          localProjects={localProjectCatalog}
+          onDownloadProject={handleDownloadProject}
+          onOpenLocalProject={handleOpenLocalProject}
+          onSwitchLocalProject={handleSwitchLocalProject}
+          onRemoveLocalProject={handleRemoveLocalProject}
+          onGetActiveLocalProject={handleGetActiveLocalProject}
+          onCheckMainDatabase={handleCheckMainDatabase}
+          onDownloadMainProject={handleDownloadMainProject}
+          onStageProject={handleStageProject}
+          onDiscardStaging={handleDiscardStaging}
+          onFinalizeProject={handleFinalizeProject}
+          onDeleteMainProject={handleDeleteMainProject}
+          onCloseLocalProject={handleCloseLocalProject}
+          faultPeriods={faultPeriods}
+          selectedPeriodKeys={activePeriodKeys}
+          periodFilteringEnabled={isSupabaseSource}
+          onChangeSelectedPeriods={handleChangeSelectedPeriods}
+          sedFaultRanking={sedFaultRanking}
+          periodSupport={periodSupport && isSupabaseSource}
+          onImportMonthly={handleImportMonthly}
+          onDeletePeriod={handleDeleteFaultPeriod}
+          compensationRows={sedMonthlyMetrics}
+          onImportCompensation={handleImportCompensation}
+          onDeleteCompensationPeriod={handleDeleteCompensationPeriod}
+          circuitCompensationRows={circuitMonthlyMetrics}
+          circuitCompensationSupport={circuitCompensationSupport && isSupabaseSource}
+          onImportCircuitCompensation={handleImportCircuitCompensation}
+          onDeleteCircuitCompensationPeriod={handleDeleteCircuitCompensationPeriod}
+          workProjects={workProjects}
+          onSaveWorkProject={handleSaveWorkProject}
+          onOpenWorkProject={handleOpenWorkProject}
+          onDeleteWorkProject={handleDeleteWorkProject}
+          onCopySedLink={handleCopySedLink}
+          sedLinkFeedback={sedLinkFeedback}
         />
       )}
       
       <div className="map-container">
         <MapViewer
           ref={mapRef}
-          currentTheme={currentTheme}
-          currentMapStyle={currentMapStyle}
-          circuitId={`${currentSedId}:${currentLlaveId}`}
+          circuitId={`${currentSedId}:${showFullSedView ? 'SED_COMPLETA' : currentLlaveId}`}
           llaveData={currentLlaveData}
+          sedOverviewLlaves={sedOverviewLlaves}
+          showFullSedView={showFullSedView}
+          selectedLlaveId={currentLlaveId}
           sedId={currentSedId}
           sedCoord={currentSedCoord}
-          faultPoints={filteredPoints}
+          faultPoints={visibleFaultPoints}
           isAddPointMode={isAddPointMode}
           isRelocating={relocatingPointIndex !== null}
           isPresentationMode={isPresentationMode}
+          isEditable={isEditable}
           circuitNote={currentAnalysis.note}
           cableGroups={currentAnalysis.cableGroups || []}
           isSegmentSelectionMode={isSegmentSelectionMode}
           selectedLineIds={selectedLineIds}
+          selectedManualEdgeIds={selectedManualEdgeRefs.map(ref => ref.edgeId)}
+          manualSelectionMessage={manualSelectionMessage}
+          selectedAnalysisSegmentId={selectedAnalysisSegmentId}
+          selectedAnalysisSegmentEdges={selectedAnalysisSegmentEdges}
+          hasSelectedAnalysisSegment={Boolean(selectedAnalysisSegment)}
           onLineClick={handleLineClick}
           onMapClick={handleMapClick}
           onSedDragEnd={handleSedDragEnd}
           onPointClick={(idx) => { setEditingPointIndex(idx); setIsFormOpen(true); }}
-          hideOverlays={isFaultTableExpanded}
+          hideOverlays={isMajorOverlayOpen}
+          sedPeriodSummary={selectedSedPeriodSummary}
+          selectedPeriodLabel={selectedPeriodLabel}
         />
       </div>
       
@@ -1164,31 +2344,26 @@ export default function Page() {
             llaveName={currentLlaveId || ''}
             sedsList={sedsList}
             localDatabase={localDatabase}
-            circuitEntries={circuitEntries}
-            circuitStatus={currentAnalysis.status}
-            onSelectSed={handleSedSelect}
-            onSelectLlave={(llaveId) => setCurrentLlaveId(llaveId)}
-            onSelectCircuit={(sedId, llaveId) => { setCurrentSedId(sedId); setCurrentLlaveId(llaveId); }}
-            currentMapStyle={currentMapStyle}
-            currentTheme={currentTheme}
+            showFullSedView={showFullSedView}
+            showAllLlavesOption
+            onSelectSed={handlePresentationSedSelect}
+            onSelectLlave={handlePresentationLlaveSelect}
             onPrevSed={() => navigateSed(-1)}
             onNextSed={() => navigateSed(1)}
-            onToggleMapStyle={() => setCurrentMapStyle(s => s === 'clean' ? 'detailed' : 'clean')}
-            onToggleTheme={() => setCurrentTheme(theme => theme === 'light' ? 'dark' : 'light')}
             onEnterEditMode={handleEnterEditMode}
           />
           <PresentationTablePanel
-            points={filteredPoints}
+            points={visibleFaultPoints}
             onRowClick={handleFlyToPoint}
             onExportExcel={handleExportExcel}
             onExportPdf={handleExportPdf}
-            onFullViewChange={setIsFaultTableExpanded}
+            onMajorOverlayChange={setMajorOverlayOpen}
           />
         </>
       )}
       
       <FaultForm
-        isOpen={isFormOpen}
+        isOpen={isEditable && isFormOpen}
         onClose={() => { setIsFormOpen(false); setEditingPointIndex(null); }}
         onSave={handleSavePoint}
         editingPoint={editingPointIndex !== null ? numberedPointsList[editingPointIndex] : null}

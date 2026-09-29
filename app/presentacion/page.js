@@ -4,13 +4,20 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import PresentationHUD from '@/components/PresentationHUD';
 import PresentationTablePanel from '@/components/PresentationTablePanel';
-import { sortSedIds } from '@/components/SearchableSedSelect';
+import DataSourceBadge from '@/components/DataSourceBadge';
+import { resolvePresentationLlaveSelection, resolvePresentationSedSelection, sortSedIds } from '@/lib/navigationSort';
 import { supabase } from '@/lib/supabase';
+import { fetchAllSupabaseRows } from '@/lib/supabasePagination';
 import { exportExcelBySed } from '@/lib/excelUtils';
 import { exportPdfReport } from '@/lib/pdfUtils';
-import { getCachedSeds, setCachedSeds } from '@/lib/dbCache';
-import { isSedMatch, isLlaveMatch } from '@/lib/sedUtils';
+import { buildReportModel } from '@/lib/reportModel';
+import { derivePeriodKeyFromStartTime } from '@/lib/monthlyFaultImport';
+import { clearActiveLocalProject, clearExpectedLocalProject, getActiveLocalProject, getCachedSeds, getExpectedLocalProject, setCachedSeds } from '@/lib/dbCache';
+import { buildSedOverviewLlaves, filterFaultsForCircuitView } from '@/lib/sedOverview';
 import { hydrateLlave } from '@/lib/circuitAnalysis';
+import { projectToInternalModel } from '@/lib/projectMappers';
+import { validateProject } from '@/lib/projectValidation';
+import { isValidCoordinatePair } from '@/lib/faultGeolocation';
 
 // MapViewer importado dinámicamente para evitar SSR
 const MapViewer = dynamic(() => import('@/components/MapViewer'), { ssr: false });
@@ -23,24 +30,62 @@ export default function PresentacionPage() {
   // Estado de Navegación
   const [currentSedId, setCurrentSedId] = useState('');
   const [currentLlaveId, setCurrentLlaveId] = useState('');
+  const [showFullSedView, setShowFullSedView] = useState(true);
 
   // Estado UI
-  const [currentTheme, setCurrentTheme] = useState('light');
-  const [currentMapStyle, setCurrentMapStyle] = useState('clean');
-  const [isFaultTableExpanded, setIsFaultTableExpanded] = useState(false);
+  const [activeMajorOverlays, setActiveMajorOverlays] = useState(() => new Set());
+  const [dataSource, setDataSource] = useState({ kind: 'SUPABASE', readOnly: false, projectId: 'geopluz-main', projectName: 'Base Principal GEOPLUZ' });
   
   const mapRef = useRef(null);
+  const reportExportBusyRef = useRef(false);
+
+  const setMajorOverlayOpen = useCallback((overlayId, isOpen) => {
+    setActiveMajorOverlays(current => {
+      const alreadyOpen = current.has(overlayId);
+      if (alreadyOpen === isOpen) return current;
+      const next = new Set(current);
+      if (isOpen) next.add(overlayId);
+      else next.delete(overlayId);
+      return next;
+    });
+  }, []);
+
+  const isMajorOverlayOpen = activeMajorOverlays.size > 0;
 
   useEffect(() => {
     loadData();
   }, []);
 
   useEffect(() => {
-    document.body.classList.toggle('dark-theme', currentTheme === 'dark');
-  }, [currentTheme]);
+    document.body.classList.remove('dark-theme');
+  }, []);
 
   // Carga de Datos desde Supabase
   async function loadData() {
+    const expectedLocalProject = getExpectedLocalProject();
+    const localProject = await getActiveLocalProject();
+    if (localProject) {
+      const validation = await validateProject(localProject);
+      if (validation.valid) {
+        const model = projectToInternalModel(localProject);
+        setLocalDatabase(model.localDatabase);
+        setNumberedPointsList(model.numberedPointsList);
+        setDataSource({ kind: 'LOCAL_PROJECT', readOnly: true, projectId: localProject.project.id, projectName: localProject.project.name });
+        const firstSed = Object.keys(model.localDatabase)[0];
+        if (firstSed) {
+          setCurrentSedId(firstSed);
+          setCurrentLlaveId('');
+        }
+        return;
+      }
+      await clearActiveLocalProject();
+    }
+
+    if (expectedLocalProject) {
+      setDataSource({ kind: 'LOCAL_PROJECT', readOnly: true, projectId: expectedLocalProject.projectId, projectName: `${expectedLocalProject.projectName} (no disponible)` });
+      return;
+    }
+
     try {
       const cachedDb = await getCachedSeds();
       if (cachedDb && Object.keys(cachedDb).length > 0) {
@@ -53,7 +98,7 @@ export default function PresentacionPage() {
     try {
       const { data: sedsData, error: sedsError } = await supabase.from('seds').select('*').range(0, 99999);
       const { data: llavesData } = await supabase.from('llaves').select('*').range(0, 99999);
-      const { data: fallasData } = await supabase.from('fallas').select('*').range(0, 99999);
+      const fallasData = await fetchAllSupabaseRows((start, end) => supabase.from('fallas').select('*').order('id', { ascending: true }).range(start, end));
       
       if (!sedsError && sedsData) {
         const db = {};
@@ -62,6 +107,7 @@ export default function PresentacionPage() {
             id: sed.id,
             name: sed.name,
             sedCoord: sed.sed_coord,
+            createdAt: sed.created_at || null,
             llaves: {}
           };
         });
@@ -80,12 +126,13 @@ export default function PresentacionPage() {
           const points = fallasData.map((f, i) => ({
             id: f.id,
             number: i + 1,
-            coords: (f.latitud && f.longitud) ? [f.latitud, f.longitud] : null,
+            coords: isValidCoordinatePair(f) ? [f.latitud, f.longitud] : null,
             ticket: f.ticket || '',
             horaInicio: f.hora_inicio || '',
             zona: f.zona || '',
             set: f.set_alimentador ? f.set_alimentador.split('/')[0]?.trim() : '',
             alimentador: f.set_alimentador ? f.set_alimentador.split('/')[1]?.trim() : '',
+            setAlimentador: f.set_alimentador || '',
             nota: f.nota || '',
             odm: f.odm || '',
             suministro: f.suministro || '',
@@ -96,7 +143,10 @@ export default function PresentacionPage() {
             falla: f.falla_real || '',
             causa: f.causa || '',
             linkCroquis: f.link_croquis || '',
-            fotos: f.fotos || []
+            fotos: f.fotos || [],
+            coordSource: f.coord_source || null,
+            coordLookupSuministro: f.coord_lookup_suministro || null,
+            createdAt: f.created_at || null
           }));
           setNumberedPointsList(points);
         }
@@ -105,8 +155,7 @@ export default function PresentacionPage() {
         const firstSed = Object.keys(db)[0];
         if (firstSed) {
            setCurrentSedId(firstSed);
-           const llaves = Object.keys(db[firstSed].llaves);
-           if (llaves.length > 0) setCurrentLlaveId(llaves[0]);
+           setCurrentLlaveId('');
         }
       }
     } catch (err) {
@@ -115,37 +164,40 @@ export default function PresentacionPage() {
   }
 
   // Filtrado flexible de Puntos de Falla por SED y Llave
-  const getFilteredPoints = useCallback(() => {
-    let list = numberedPointsList;
-    if (currentSedId) {
-      list = list.filter(pt => 
-        isSedMatch(pt.sed, pt.sedLlave, currentSedId) && 
-        isLlaveMatch(pt.llaveSistema, pt.sedLlave, currentLlaveId)
-      );
-    }
-    return list.map((pt, i) => ({ ...pt, localNumber: i + 1 }));
-  }, [numberedPointsList, currentSedId, currentLlaveId]);
+  const getFilteredPoints = useCallback(() => filterFaultsForCircuitView(numberedPointsList, {
+    sedId: currentSedId,
+    llaveId: currentLlaveId,
+    showFullSed: showFullSedView
+  }), [numberedPointsList, currentSedId, currentLlaveId, showFullSedView]);
 
   const filteredPoints = getFilteredPoints();
 
   function handleFlyToPoint(point) {
     if (mapRef.current && point.coords) {
-      mapRef.current.focusFailure(point.coords);
+      mapRef.current.focusFailure(point);
     }
   }
 
-  async function handleExportExcel() {
-    const dataToExport = filteredPoints.length > 0 ? filteredPoints : numberedPointsList;
-    await exportExcelBySed(dataToExport, currentSedId, currentLlaveId);
+  async function handleExportReport(format) {
+    if (reportExportBusyRef.current) return;
+    reportExportBusyRef.current = true;
+    try {
+      const model = buildReportModel({
+        sedId: currentSedId, llaveId: showFullSedView ? '' : currentLlaveId,
+        faults: filteredPoints,
+        selectedPeriodKeys: [...new Set(filteredPoints.map(f => derivePeriodKeyFromStartTime(f.horaInicio)).filter(Boolean))].sort(),
+        network: showFullSedView ? sedOverviewLlaves : currentLlaveData ? [{ llaveId: currentLlaveId, lines: currentLlaveData.lines }] : [],
+        sedCoordinate: currentSedCoord,
+        status: currentLlaveData?.analysis?.status || 'cargado',
+        conclusion: currentLlaveData?.analysis?.note || ''
+      });
+      if (format === 'excel') await exportExcelBySed(model);
+      else await exportPdfReport(model);
+    } catch (error) { alert(`No se pudo generar el reporte: ${error.message}`); }
+    finally { reportExportBusyRef.current = false; }
   }
-
-  async function handleExportPdf() {
-    const dataToExport = filteredPoints.length > 0 ? filteredPoints : numberedPointsList;
-    await exportPdfReport(dataToExport, currentSedId, currentLlaveId, {
-      status: currentLlaveData?.analysis?.status || 'cargado',
-      note: currentLlaveData?.analysis?.note || ''
-    });
-  }
+  async function handleExportExcel() { await handleExportReport('excel'); }
+  async function handleExportPdf() { await handleExportReport('pdf'); }
 
   // Navegación
   const sedsList = sortSedIds(Object.keys(localDatabase));
@@ -155,14 +207,10 @@ export default function PresentacionPage() {
     let newIndex = currentIndex + dir;
     if (newIndex < 0) newIndex = sedsList.length - 1;
     if (newIndex >= sedsList.length) newIndex = 0;
-    setCurrentSedId(sedsList[newIndex]);
-    
-    const llaves = Object.keys(localDatabase[sedsList[newIndex]].llaves || {});
-    if (llaves.length > 0) {
-      setCurrentLlaveId(llaves[0]);
-    } else {
-      setCurrentLlaveId('');
-    }
+    const selection = resolvePresentationSedSelection(sedsList[newIndex]);
+    setCurrentSedId(selection.sedId);
+    setCurrentLlaveId(selection.llaveId);
+    setShowFullSedView(selection.showFullSedView);
   }
 
   useEffect(() => {
@@ -179,19 +227,26 @@ export default function PresentacionPage() {
     : null;
 
   const currentSedCoord = localDatabase[currentSedId]?.sedCoord || null;
-  const circuitEntries = Object.entries(localDatabase).flatMap(([sedId, sed]) => Object.entries(sed.llaves || {}).map(([llaveId, llave]) => ({
-    sedId, llaveId, sedName: sed.name || sedId, status: llave.analysis?.status || 'cargado'
-  })));
+  const sedOverviewLlaves = buildSedOverviewLlaves(localDatabase[currentSedId], currentLlaveId);
 
   return (
     <>
+      <DataSourceBadge
+        dataSource={dataSource}
+        onCloseLocalProject={dataSource.kind === 'LOCAL_PROJECT' ? async () => {
+          await clearActiveLocalProject();
+          clearExpectedLocalProject();
+          window.location.href = '/';
+        } : null}
+      />
       <div className="map-container">
         <MapViewer
           ref={mapRef}
-          currentTheme={currentTheme}
-          currentMapStyle={currentMapStyle}
-          circuitId={`${currentSedId}:${currentLlaveId}`}
+          circuitId={`${currentSedId}:${showFullSedView ? 'SED_COMPLETA' : currentLlaveId}`}
           llaveData={currentLlaveData}
+          sedOverviewLlaves={sedOverviewLlaves}
+          showFullSedView={showFullSedView}
+          selectedLlaveId={currentLlaveId}
           sedId={currentSedId}
           sedCoord={currentSedCoord}
           faultPoints={filteredPoints}
@@ -204,7 +259,7 @@ export default function PresentacionPage() {
           onMapClick={() => {}}
           onSedDragEnd={() => {}}
           onPointClick={(idx) => handleFlyToPoint(filteredPoints.find(p => p.localNumber - 1 === idx))}
-          hideOverlays={isFaultTableExpanded}
+          hideOverlays={isMajorOverlayOpen}
         />
       </div>
       
@@ -214,22 +269,21 @@ export default function PresentacionPage() {
         llaveName={currentLlaveId || ''}
         sedsList={sedsList}
         localDatabase={localDatabase}
-        circuitEntries={circuitEntries}
-        circuitStatus={currentLlaveData?.analysis?.status || 'cargado'}
+        showFullSedView={showFullSedView}
+        showAllLlavesOption
         onSelectSed={(sedId) => {
-          setCurrentSedId(sedId);
-          const llaves = Object.keys(localDatabase[sedId]?.llaves || {});
-          if (llaves.length > 0) setCurrentLlaveId(llaves[0]);
-          else setCurrentLlaveId('');
+          const selection = resolvePresentationSedSelection(sedId);
+          setCurrentSedId(selection.sedId);
+          setCurrentLlaveId(selection.llaveId);
+          setShowFullSedView(selection.showFullSedView);
         }}
-        onSelectLlave={(llaveId) => setCurrentLlaveId(llaveId)}
-        onSelectCircuit={(sedId, llaveId) => { setCurrentSedId(sedId); setCurrentLlaveId(llaveId); }}
-        currentMapStyle={currentMapStyle}
-        currentTheme={currentTheme}
+        onSelectLlave={(llaveId) => {
+          const selection = resolvePresentationLlaveSelection(currentSedId, llaveId);
+          setCurrentLlaveId(selection.llaveId);
+          setShowFullSedView(selection.showFullSedView);
+        }}
         onPrevSed={() => navigateSed(-1)}
         onNextSed={() => navigateSed(1)}
-        onToggleMapStyle={() => setCurrentMapStyle(s => s === 'clean' ? 'detailed' : 'clean')}
-        onToggleTheme={() => setCurrentTheme(theme => theme === 'light' ? 'dark' : 'light')}
         onEnterEditMode={() => { window.location.href = '/'; }}
       />
       <PresentationTablePanel
@@ -237,7 +291,7 @@ export default function PresentacionPage() {
         onRowClick={handleFlyToPoint}
         onExportExcel={handleExportExcel}
         onExportPdf={handleExportPdf}
-        onFullViewChange={setIsFaultTableExpanded}
+        onMajorOverlayChange={setMajorOverlayOpen}
       />
     </>
   );
